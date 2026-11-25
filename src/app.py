@@ -11,6 +11,7 @@ import streamlit as st
 from datetime import date
 
 from data import SPREADS, beta_blume, note_synthetique, parametres_pays
+from export import exporter_excel
 from dcf import (DonneesEntreprise, Hypotheses, ParametresWACC, dcf_inverse,
                  sensibilite_croissance_marge, sensibilite_wacc_g, valoriser, wacc)
 
@@ -29,6 +30,8 @@ EXEMPLE_SG = {
     "date_cloture": pd.Timestamp("2025-12-31"),
     "decalage": max((date.today() - date(2025, 12, 31)).days / 365.25, 0.0),
     "dividendes": 0.0, "alertes": [], "devise_comptes": "EUR",
+    "plus_bas_52s": 63.52, "plus_haut_52s": 91.30, "ebitda_dernier": 5293 + 2141,
+    "comparables_defaut": "HOLN.SW, SIKA.SW, HEI.DE, KRX.IR, CRH",
     "hypotheses": Hypotheses(croissance_ca=0.0125, marge_ebit=0.115, da_ca=0.04, capex_ca=0.0425,
                              bfr_ca=0.021, taux_is=0.26, g=0.02, horizon=5),
     "entreprise": DonneesEntreprise(ca_dernier=46483, bfr_dernier=968, annee_derniere=2025,
@@ -49,8 +52,26 @@ def charger(ticker: str) -> dict:
             "pays": d["pays"], "taux_is_source": d["taux_is_source"], "dettes_locatives": d["dettes_locatives"],
             "date_cloture": d["date_cloture"], "decalage": d["decalage"], "dividendes": d["dividendes"],
             "alertes": d["alertes"],
+            "plus_bas_52s": m["plus_bas_52s"], "plus_haut_52s": m["plus_haut_52s"],
+            "ebitda_dernier": float(d["historique"].loc["EBIT"].iloc[-1] + d["historique"].loc["D&A"].iloc[-1]),
+            "comparables_defaut": ", ".join(chercher_comparables(ticker)),
             "hypotheses": d["hypotheses"], "entreprise": d["entreprise"],
             "historique": d["historique"], "ratios": d["ratios"]}
+
+
+@st.cache_data(ttl=86400, show_spinner="Recherche automatique des comparables…")
+def chercher_comparables(ticker: str) -> list[str]:
+    from data import comparables_auto
+    try:
+        return comparables_auto(ticker)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=3600, show_spinner="Récupération des multiples des comparables…")
+def charger_comparables(tickers: tuple[str, ...]) -> pd.DataFrame:
+    from data import comparables
+    return comparables(list(tickers))
 
 
 def pct(x: float, dec: int = 1) -> str:
@@ -257,7 +278,8 @@ if res["fonds_propres"] < 0:
     st.error("La valeur des fonds propres est négative : la dette nette est probablement surestimée "
              "(activité de financement consolidée, comme la banque de Renault ?). Corrige-la ci-dessus.")
 
-onglets = st.tabs(["Projection", "Sensibilité", "DCF inversé", "Scénarios", "Contrôles", "Historique"])
+onglets = st.tabs(["Projection", "Sensibilité", "DCF inversé", "Scénarios", "Comparables",
+                   "Football field", "Contrôles", "Historique"])
 
 with onglets[0]:
     c1, c2, c3, c4 = st.columns(4)
@@ -400,6 +422,93 @@ with onglets[3]:
         st.caption("Ligne pointillée : cours actuel.")
 
 with onglets[4]:
+    st.markdown("**Valorisation par les multiples de comparables** : on applique à l'EBITDA de "
+                "l'entreprise le multiple VE / EBITDA auquel le marché valorise des entreprises similaires.")
+    cle_comp = f"comp_{cle}"
+    st.session_state.setdefault(cle_comp, donnees["comparables_defaut"])
+    if st.button("🔍 Rechercher automatiquement", key=f"auto_{cle}",
+                 help="Même secteur d'activité (classification Yahoo), même zone géographique, "
+                      "taille la plus proche."):
+        trouves = chercher_comparables("SGO.PA" if ticker == "SGO-exemple" else ticker)
+        if trouves:
+            st.session_state[cle_comp] = ", ".join(trouves)
+            st.rerun()
+        else:
+            st.warning("Aucun comparable trouvé automatiquement : saisis-les à la main.")
+    saisie = st.text_input("Tickers des comparables (séparés par des virgules)", key=cle_comp,
+                           placeholder="ex. HOLN.SW, SIKA.SW, HEI.DE",
+                           help="Vérifie toujours la liste : la classification sectorielle de Yahoo "
+                                "n'est pas parfaite. 4 à 6 entreprises suffisent.")
+    tickers_comp = tuple(t.strip().upper() for t in saisie.split(",") if t.strip())
+    comp, val_multiples = None, None
+    if tickers_comp:
+        try:
+            comp = charger_comparables(tickers_comp)
+        except Exception as e:
+            st.error(f"Impossible de récupérer les comparables : {e}")
+    if comp is not None and comp["VE / EBITDA"].notna().any():
+        mult = comp["VE / EBITDA"].dropna()
+        ebitda0 = donnees["ebitda_dernier"]
+        passif = dette_nette + minoritaires + provisions
+
+        def par_action(m_):
+            return (m_ * ebitda0 - passif) / nb_actions
+
+        stats = {"1er quartile": mult.quantile(0.25), "Médiane": mult.median(), "3e quartile": mult.quantile(0.75)}
+        val_multiples = {k: par_action(v) for k, v in stats.items()}
+        st.dataframe(comp.style.format({c: lambda x: f"{x:.1f}x".replace(".", ",") if pd.notna(x) else "–"
+                                        for c in ("VE / EBITDA", "VE / CA", "PER")}),
+                     hide_index=True, width="stretch")
+        c1, c2, c3 = st.columns(3)
+        for col, (k, v) in zip((c1, c2, c3), stats.items()):
+            col.metric(f"VE / EBITDA — {k}", f"{v:.1f}x".replace(".", ","),
+                       delta=f"{nombre(val_multiples[k], 2)} {donnees['devise']} par action", delta_color="off")
+        multiple_dcf = res["ve_cloture"] / ebitda0
+        ecart = multiple_dcf / stats["Médiane"] - 1
+        st.info(f"Ton DCF valorise l'entreprise à {multiple_dcf:.1f}x son EBITDA {e0.annee_derniere}, ".replace(".", ",")
+                + f"contre {stats['Médiane']:.1f}x pour la médiane des comparables ".replace(".", ",")
+                + f"({pct(ecart)}). Un gros écart doit s'expliquer : croissance, marges, risque ou "
+                  "choix des comparables.")
+        st.caption(f"EBITDA {e0.annee_derniere} : {nombre(ebitda0)} · valeur par action = (multiple × EBITDA "
+                   "− dette nette − minoritaires − provisions) / nombre d'actions. Multiples Yahoo sur les "
+                   "12 derniers mois.")
+    elif tickers_comp:
+        st.warning("Aucun multiple VE / EBITDA exploitable pour ces tickers.")
+
+with onglets[5]:
+    st.markdown("**Football field** : les fourchettes de valeur par action obtenues avec chaque méthode, "
+                "comparées au cours actuel.")
+    barres_ff = [
+        ("DCF — sensibilité WACC × g", float(sens.min().min()), float(sens.max().max())),
+        ("DCF — scénarios", float(scen["Valeur"].min()), float(scen["Valeur"].max())),
+    ]
+    if val_multiples:
+        barres_ff.append(("Comparables — VE / EBITDA (Q1 à Q3)",
+                          val_multiples["1er quartile"], val_multiples["3e quartile"]))
+    if donnees.get("plus_bas_52s"):
+        barres_ff.append(("Cours — plus bas / plus haut 52 semaines",
+                          donnees["plus_bas_52s"], donnees["plus_haut_52s"]))
+    ff = pd.DataFrame(barres_ff, columns=["Méthode", "Bas", "Haut"])
+    ordre = list(ff["Méthode"])
+    axe_y = alt.Y("Méthode:N", sort=ordre, title=None, axis=alt.Axis(labelLimit=260))
+    barres = alt.Chart(ff).mark_bar(height=26, color="#9DB4D9").encode(
+        x=alt.X("Bas:Q", title=f"Valeur par action ({donnees['devise']})", scale=alt.Scale(zero=False)),
+        x2="Haut:Q", y=axe_y)
+    txt_bas = alt.Chart(ff).mark_text(align="right", dx=-5, fontSize=11).encode(
+        x="Bas:Q", y=axe_y, text=alt.Text("Bas:Q", format=",.1f"))
+    txt_haut = alt.Chart(ff).mark_text(align="left", dx=5, fontSize=11).encode(
+        x="Haut:Q", y=axe_y, text=alt.Text("Haut:Q", format=",.1f"))
+    reperes = pd.DataFrame({"Repère": ["Cours actuel", "DCF central"],
+                            "Valeur": [e0.cours, res["valeur_action"]]})
+    lignes_ref = alt.Chart(reperes).mark_rule(strokeWidth=2, strokeDash=[6, 4]).encode(
+        x="Valeur:Q", color=alt.Color("Repère:N", scale=alt.Scale(range=["#C0504D", "#1F3864"]),
+                                      legend=alt.Legend(orient="top", title=None)))
+    st.altair_chart((barres + txt_bas + txt_haut + lignes_ref).properties(height=60 + 55 * len(ff)),
+                    width="stretch")
+    st.caption("Chaque barre va de la valeur la plus basse à la plus haute de la méthode. "
+               "Les méthodes qui se recoupent autour du cours suggèrent une action correctement valorisée.")
+
+with onglets[6]:
     ebitda_1 = proj["EBIT"].iloc[0] + proj["D&A"].iloc[0]
     ebitda_n = proj["EBIT"].iloc[-1] + proj["D&A"].iloc[-1]
     controles = [
@@ -420,7 +529,7 @@ with onglets[4]:
     nb_ok = int(df_ctl["OK"].sum())
     (st.success if nb_ok == len(df_ctl) else st.warning)(f"{nb_ok} / {len(df_ctl)} contrôles OK")
 
-with onglets[5]:
+with onglets[7]:
     if donnees["historique"] is None:
         st.info("Exemple construit à partir du rapport annuel : voir le fichier Excel du projet.")
     else:
@@ -434,6 +543,26 @@ with onglets[5]:
         st.dataframe(rat.style.format(lambda x: pct(x) if pd.notna(x) else "–"),
                      width="stretch")
         st.caption("Les définitions de Yahoo (EBIT, D&A, BFR) peuvent différer du rapport annuel.")
+
+# ---------------------------------------------------------------------------
+# Export Excel (avec les formules)
+# ---------------------------------------------------------------------------
+
+st.sidebar.divider()
+sens_export = sens.copy()
+scen_export = scen.set_index("Scénario")[["Valeur", "Potentiel", "Poids"]]
+fichier = exporter_excel(
+    donnees["nom"], donnees["devise"], hyp, ent,
+    ParametresWACC(taux_sans_risque=rf, beta=beta, prime_risque=prime, kd=rf + spread, taux_is=taux_is,
+                   capitalisation=capitalisation, dette=max(dette_nette, 0.0)),
+    spread, options["decalage"], options["dividendes_par_action"],
+    tableaux={"Sensibilité WACC × g": sens_export, "Sensibilité croissance × marge": sens2,
+              "Scénarios": scen_export})
+st.sidebar.download_button("📥 Télécharger le modèle Excel", data=fichier,
+                           file_name=f"DCF_{ticker.replace('.', '_')}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           width="stretch",
+                           help="Le classeur contient les formules : modifie une hypothèse, tout se recalcule.")
 
 st.divider()
 st.caption("Projet personnel à visée pédagogique — ne constitue pas un conseil en investissement.")

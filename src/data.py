@@ -242,6 +242,8 @@ def donnees_marche(ticker: str) -> dict:
         "actions_yahoo": (info.get("sharesOutstanding") or fi["shares"]) / 1e6,
         "capitalisation_yahoo": (info.get("marketCap") or 0) / 1e6,
         "beta_yahoo": info.get("beta"),
+        "plus_bas_52s": float(fi["yearLow"]) / (100 if fi["currency"] == "GBp" else 1),
+        "plus_haut_52s": float(fi["yearHigh"]) / (100 if fi["currency"] == "GBp" else 1),
         "logo": f"https://www.google.com/s2/favicons?domain={site}&sz=128" if site else None,
     }
 
@@ -268,6 +270,91 @@ def dividendes_depuis(ticker: str, date: pd.Timestamp) -> float:
         return 0.0
     index = div.index.tz_localize(None) if div.index.tz is not None else div.index
     return float(div[index > date].sum())
+
+
+REGIONS = {"France": "fr", "Germany": "de", "United Kingdom": "gb", "Switzerland": "ch",
+           "Netherlands": "nl", "Italy": "it", "Spain": "es", "Belgium": "be", "Ireland": "ie",
+           "Sweden": "se", "Denmark": "dk", "Finland": "fi", "Norway": "no", "Austria": "at",
+           "Portugal": "pt", "United States": "us", "Canada": "ca", "Japan": "jp"}
+EUROPE = ["fr", "de", "gb", "ch", "nl", "it", "es", "be", "ie", "se", "dk", "fi", "no", "at", "pt"]
+# Places de cotation secondaires (doublons d'une même entreprise) à écarter
+PLACES_SECONDAIRES = (".F", ".BE", ".DU", ".MU", ".SG", ".HM", ".HA", ".VI", ".IL")
+
+
+def comparables_auto(ticker: str, n: int = 6) -> list[str]:
+    """Propose automatiquement des comparables : même secteur d'activité (« industry » Yahoo),
+    même zone géographique (Europe ou pays), taille la plus proche possible.
+    On élargit la fourchette de taille si on ne trouve pas assez d'entreprises."""
+    from yfinance import EquityQuery
+
+    info = yf.Ticker(ticker).info
+    industrie, capi = info.get("industry"), info.get("marketCap")
+    if not industrie:
+        return []
+    region = REGIONS.get(info.get("country"), "us")
+    regions = EUROPE if region in EUROPE else [region]
+    zone = EquityQuery("is-in", ["region", *regions]) if len(regions) > 1 \
+        else EquityQuery("eq", ["region", regions[0]])
+
+    trouves: dict[str, tuple[str, float]] = {}          # nom → (ticker, capitalisation)
+    for facteur in (5, 20, None):                        # fourchettes de taille de plus en plus larges
+        conditions = [EquityQuery("eq", ["industry", industrie]), zone]
+        if capi and facteur:
+            conditions.append(EquityQuery("btwn", ["intradaymarketcap", capi / facteur, capi * facteur]))
+        try:
+            reponse = yf.screen(EquityQuery("and", conditions), size=50,
+                                sortField="intradaymarketcap", sortAsc=False)
+        except Exception:
+            continue
+        for q in reponse.get("quotes", []):
+            symbole = q.get("symbol", "")
+            nom = q.get("longName") or q.get("shortName") or symbole
+            if (symbole.upper() == ticker.upper() or symbole.endswith(PLACES_SECONDAIRES)
+                    or nom == info.get("longName") or nom in trouves):
+                continue
+            trouves[nom] = (symbole, q.get("marketCap") or 0)
+        if len(trouves) >= n:
+            break
+
+    if not trouves:                                      # secours : grandes entreprises du secteur
+        try:
+            top = yf.Industry(info["industryKey"]).top_companies
+            return [t for t in top.index if t.upper() != ticker.upper()][:n]
+        except Exception:
+            return []
+
+    # On garde les entreprises dont la taille est la plus proche
+    import math
+    candidats = sorted(trouves.values(),
+                       key=lambda x: abs(math.log(max(x[1], 1) / capi)) if capi else 0)
+    return [symbole for symbole, _ in candidats[:n]]
+
+
+def comparables(tickers: list[str]) -> pd.DataFrame:
+    """Multiples de marché des entreprises comparables (source : Yahoo Finance).
+    Les multiples sont sans unité : on peut comparer des entreprises de devises différentes."""
+    lignes = []
+    for tk in tickers:
+        try:
+            info = yf.Ticker(tk).info
+        except Exception:
+            continue
+        if not info or info.get("enterpriseToEbitda") is None and info.get("trailingPE") is None:
+            continue
+        lignes.append({
+            "Ticker": tk,
+            "Entreprise": info.get("shortName") or info.get("longName") or tk,
+            "Pays": info.get("country"),
+            "VE / EBITDA": info.get("enterpriseToEbitda"),
+            "VE / CA": info.get("enterpriseToRevenue"),
+            "PER": info.get("trailingPE"),
+        })
+    df = pd.DataFrame(lignes, columns=["Ticker", "Entreprise", "Pays", "VE / EBITDA", "VE / CA", "PER"])
+    for col in ("VE / EBITDA", "VE / CA", "PER"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        # multiples négatifs ou extrêmes : sans signification économique
+        df.loc[(df[col] <= 0) | (df[col] > 100), col] = float("nan")
+    return df
 
 
 # ---------------------------------------------------------------------------
