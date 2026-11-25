@@ -11,8 +11,8 @@ import streamlit as st
 from datetime import date
 
 from data import SPREADS, beta_blume, note_synthetique, parametres_pays
-from dcf import (DonneesEntreprise, Hypotheses, ParametresWACC,
-                 sensibilite_wacc_g, valoriser, wacc)
+from dcf import (DonneesEntreprise, Hypotheses, ParametresWACC, dcf_inverse,
+                 sensibilite_croissance_marge, sensibilite_wacc_g, valoriser, wacc)
 
 st.set_page_config(page_title="DCF automatisé", page_icon="📈", layout="wide")
 
@@ -216,8 +216,16 @@ ent = DonneesEntreprise(ca_dernier=e0.ca_dernier, bfr_dernier=e0.bfr_dernier,
                         minoritaires=minoritaires, provisions_retraites=provisions,
                         nb_actions=nb_actions, cours=e0.cours)
 capitalisation = nb_actions * e0.cours
-w = wacc(ParametresWACC(taux_sans_risque=rf, beta=beta, prime_risque=prime, kd=rf + spread,
-                        taux_is=taux_is, capitalisation=capitalisation, dette=max(dette_nette, 0.0)))
+
+
+def wacc_pour(b: float) -> float:
+    """WACC avec les paramètres de la barre latérale et le bêta b."""
+    return wacc(ParametresWACC(taux_sans_risque=rf, beta=b, prime_risque=prime, kd=rf + spread,
+                               taux_is=taux_is, capitalisation=capitalisation,
+                               dette=max(dette_nette, 0.0)))
+
+
+w = wacc_pour(beta)
 
 try:
     res = valoriser(hyp, ent, w, **options)
@@ -249,7 +257,7 @@ if res["fonds_propres"] < 0:
     st.error("La valeur des fonds propres est négative : la dette nette est probablement surestimée "
              "(activité de financement consolidée, comme la banque de Renault ?). Corrige-la ci-dessus.")
 
-onglets = st.tabs(["Projection", "Sensibilité", "Contrôles", "Historique"])
+onglets = st.tabs(["Projection", "Sensibilité", "DCF inversé", "Scénarios", "Contrôles", "Historique"])
 
 with onglets[0]:
     c1, c2, c3, c4 = st.columns(4)
@@ -294,7 +302,104 @@ with onglets[1]:
     st.markdown("**Valeur par action selon le WACC et g** (vert : au-dessus du cours)")
     st.dataframe(sens.style.map(couleur).format(lambda x: nombre(x, 2)), width="stretch")
 
+    croissances = [round(croissance + d, 4) for d in (-0.02, -0.01, -0.005, 0, 0.005, 0.01, 0.02)]
+    marges = [round(marge + d, 4) for d in (-0.01, -0.005, 0, 0.005, 0.01) if marge + d > 0]
+    sens2 = sensibilite_croissance_marge(hyp, ent, w, croissances, marges, **options)
+    sens2.index = [f"Croissance {pct(x, 2)}" for x in sens2.index]
+    sens2.columns = [f"Marge {pct(x, 2)}" for x in sens2.columns]
+    st.markdown("**Valeur par action selon la croissance du CA et la marge EBIT**")
+    st.dataframe(sens2.style.map(couleur).format(lambda x: nombre(x, 2)), width="stretch")
+    st.caption("Compare l'effet d'un point de marge et d'un point de croissance : "
+               "c'est souvent la marge qui pèse le plus.")
+
 with onglets[2]:
+    st.markdown(f"**Que faut-il supposer pour justifier le cours de {nombre(e0.cours, 2)} "
+                f"{donnees['devise']} ?** Chaque ligne fait varier un seul paramètre, "
+                "les autres restant à leur valeur retenue.")
+    inverses = {
+        "Croissance du CA": (dcf_inverse(hyp, ent, w, "croissance_ca", **options), croissance),
+        "Marge EBIT": (dcf_inverse(hyp, ent, w, "marge_ebit", **options), marge),
+        "WACC": (dcf_inverse(hyp, ent, w, "wacc", **options), w),
+    }
+    colonnes = st.columns(3)
+    for col, (nom, (implicite, retenu)) in zip(colonnes, inverses.items()):
+        if implicite is None:
+            col.metric(f"{nom} implicite", "hors bornes")
+        else:
+            ecart = (implicite - retenu) * 100
+            col.metric(f"{nom} implicite", pct(implicite, 2),
+                       delta=f"{ecart:+.2f} pt vs retenu ({pct(retenu, 2)})".replace(".", ","),
+                       delta_color="off")
+    phrases = []
+    if inverses["Croissance du CA"][0] is not None:
+        phrases.append(f"une croissance du CA de {pct(inverses['Croissance du CA'][0], 1)} par an")
+    if inverses["Marge EBIT"][0] is not None:
+        phrases.append(f"une marge EBIT de {pct(inverses['Marge EBIT'][0], 1)}")
+    if inverses["WACC"][0] is not None:
+        phrases.append(f"un WACC de {pct(inverses['WACC'][0], 1)}")
+    if phrases:
+        st.info("Le cours actuel suppose " + ", ou ".join(phrases) + ". "
+                "À toi de juger si c'est réaliste au regard de l'historique et de la guidance.")
+    st.caption("Méthode : recherche par dichotomie de la valeur du paramètre pour laquelle la valeur "
+               "par action égale le cours.")
+
+with onglets[3]:
+    st.markdown("**Écarts par rapport au scénario central** (en points, modifiables). "
+                "Le scénario central reprend les curseurs ci-dessus.")
+    ecarts_defaut = pd.DataFrame(
+        {"Pessimiste": [-1.25, -1.0, -0.5, 0.0], "Optimiste": [2.25, 1.0, 0.0,
+                                                               round(beta_blume(beta) - beta, 2)]},
+        index=["Croissance du CA (pt)", "Marge EBIT (pt)", "g (pt)", "Bêta"])
+    ecarts = st.data_editor(ecarts_defaut, key=f"scen_{cle}", width="stretch")
+    p1, p2, p3 = st.columns(3)
+    poids = {"Pessimiste": p1.number_input("Poids pessimiste (%)", 0, 100, 25, 5, key=f"pp_{cle}"),
+             "Central": p2.number_input("Poids central (%)", 0, 100, 50, 5, key=f"pc_{cle}"),
+             "Optimiste": p3.number_input("Poids optimiste (%)", 0, 100, 25, 5, key=f"po_{cle}")}
+
+    lignes = []
+    for nom in ("Pessimiste", "Central", "Optimiste"):
+        e = ecarts[nom] if nom != "Central" else pd.Series(0.0, index=ecarts.index)
+        h_s = Hypotheses(**{**hyp.__dict__,
+                            "croissance_ca": croissance + e["Croissance du CA (pt)"] / 100,
+                            "marge_ebit": marge + e["Marge EBIT (pt)"] / 100,
+                            "g": g + e["g (pt)"] / 100})
+        b_s = beta + e["Bêta"]
+        w_s = wacc_pour(b_s)
+        try:
+            v = valoriser(h_s, ent, w_s, **options)["valeur_action"]
+        except ValueError:
+            v = float("nan")
+        lignes.append({"Scénario": nom, "Croissance": pct(h_s.croissance_ca, 2),
+                       "Marge EBIT": pct(h_s.marge_ebit, 2), "g": pct(h_s.g, 2),
+                       "Bêta": f"{b_s:.2f}".replace(".", ","), "WACC": pct(w_s, 2),
+                       "Valeur": v, "Potentiel": v / e0.cours - 1, "Poids": poids[nom] / 100})
+    scen = pd.DataFrame(lignes)
+    total_poids = scen["Poids"].sum()
+    st.dataframe(scen.style.format({"Valeur": lambda x: nombre(x, 2), "Potentiel": lambda x: pct(x),
+                                    "Poids": lambda x: pct(x, 0)}),
+                 hide_index=True, width="stretch")
+    if abs(total_poids - 1) > 1e-9:
+        st.warning(f"Le total des poids fait {pct(total_poids, 0)} au lieu de 100 %.")
+    else:
+        v_pond = float((scen["Valeur"] * scen["Poids"]).sum())
+        c1, c2 = st.columns(2)
+        c1.metric("Valeur pondérée", f"{nombre(v_pond, 2)} {donnees['devise']}")
+        c2.metric("Potentiel pondéré", pct(v_pond / e0.cours - 1))
+        barres = alt.Chart(scen).mark_bar(size=60).encode(
+            x=alt.X("Scénario:N", sort=["Pessimiste", "Central", "Optimiste"], title=None,
+                    axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Valeur:Q", title=f"Valeur par action ({donnees['devise']})"),
+            color=alt.Color("Scénario:N", legend=None,
+                            scale=alt.Scale(domain=["Pessimiste", "Central", "Optimiste"],
+                                            range=["#C0504D", "#1F3864", "#4F9A57"])))
+        texte = barres.mark_text(dy=-8, fontSize=12).encode(
+            text=alt.Text("Valeur:Q", format=",.2f"), color=alt.value("#333"))
+        regle = alt.Chart(pd.DataFrame({"Cours": [e0.cours]})).mark_rule(
+            strokeDash=[6, 4], color="#7F7F7F").encode(y="Cours:Q")
+        st.altair_chart((barres + texte + regle).properties(height=300), width="stretch")
+        st.caption("Ligne pointillée : cours actuel.")
+
+with onglets[4]:
     ebitda_1 = proj["EBIT"].iloc[0] + proj["D&A"].iloc[0]
     ebitda_n = proj["EBIT"].iloc[-1] + proj["D&A"].iloc[-1]
     controles = [
@@ -305,7 +410,8 @@ with onglets[2]:
          5 <= res["vt"] / ebitda_n <= 15),
         ("Capex ≥ D&A", pct(capex - da, 2), "≥ 0", capex >= da),
         ("ROIC implicite de la VT", "infini" if res["roic_implicite"] == float("inf")
-         else pct(res["roic_implicite"]), "≤ 25 %", res["roic_implicite"] <= 0.25),
+         else "n.d." if pd.isna(res["roic_implicite"]) else pct(res["roic_implicite"]),
+         "≤ 25 %", bool(res["roic_implicite"] <= 0.25)),
         ("Fonds propres positifs", nombre(res["fonds_propres"]), "> 0", res["fonds_propres"] > 0),
     ]
     df_ctl = pd.DataFrame(controles, columns=["Contrôle", "Valeur", "Règle", "OK"])
@@ -314,7 +420,7 @@ with onglets[2]:
     nb_ok = int(df_ctl["OK"].sum())
     (st.success if nb_ok == len(df_ctl) else st.warning)(f"{nb_ok} / {len(df_ctl)} contrôles OK")
 
-with onglets[3]:
+with onglets[5]:
     if donnees["historique"] is None:
         st.info("Exemple construit à partir du rapport annuel : voir le fichier Excel du projet.")
     else:

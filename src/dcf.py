@@ -168,9 +168,12 @@ def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
 
     # ROIC implicite de la VT : g / taux de réinvestissement de la dernière année
     reinvesti = dernier["Capex"] - dernier["D&A"] + dernier["ΔBFR"] + dernier["Loyers IFRS 16"]
-    taux_reinvestissement = reinvesti / dernier["NOPAT"]
+    taux_reinvestissement = (reinvesti / dernier["NOPAT"] if dernier["NOPAT"] > 0
+                             else float("nan"))          # NOPAT nul ou négatif : ratio sans sens
     if h.roic_terminal is not None:
         roic_implicite = h.roic_terminal
+    elif pd.isna(taux_reinvestissement):
+        roic_implicite = float("nan")
     elif taux_reinvestissement > 0:
         roic_implicite = h.g / taux_reinvestissement
     else:
@@ -213,6 +216,58 @@ def sensibilite_wacc_g(h: Hypotheses, d: DonneesEntreprise,
         h_g = Hypotheses(**{**h.__dict__, "g": g})
         tableau[g] = [valoriser(h_g, d, w, **options)["valeur_action"] for w in waccs]
     return pd.DataFrame(tableau, index=waccs)
+
+
+def sensibilite_croissance_marge(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
+                                 croissances: list[float], marges: list[float],
+                                 **options) -> pd.DataFrame:
+    """Tableau de la valeur par action : croissance du CA en lignes, marge EBIT en colonnes."""
+    tableau = {}
+    for m in marges:
+        tableau[m] = [valoriser(Hypotheses(**{**h.__dict__, "croissance_ca": c, "marge_ebit": m}),
+                                d, wacc_, **options)["valeur_action"] for c in croissances]
+    return pd.DataFrame(tableau, index=croissances)
+
+
+# ---------------------------------------------------------------------------
+# 6. DCF inversé : quelle hypothèse justifie le cours actuel ?
+# ---------------------------------------------------------------------------
+
+BORNES_INVERSE = {"croissance_ca": (-0.10, 0.30), "marge_ebit": (0.0, 0.60), "wacc": (None, 0.30)}
+
+
+def dcf_inverse(h: Hypotheses, d: DonneesEntreprise, wacc_: float, parametre: str,
+                cible: float | None = None, tolerance: float = 1e-6, **options) -> float | None:
+    """
+    Cherche la valeur du paramètre (« croissance_ca », « marge_ebit » ou « wacc ») pour laquelle
+    la valeur par action égale la cible (le cours, par défaut), toutes les autres hypothèses
+    restant inchangées. Méthode de la dichotomie : la valeur par action varie dans un seul sens
+    avec chacun de ces paramètres. Renvoie None si la solution sort des bornes plausibles.
+    """
+    cible = d.cours if cible is None else cible
+    bas, haut = BORNES_INVERSE[parametre]
+    if parametre == "wacc":
+        bas = h.g + 0.005                                  # le WACC doit rester > g
+
+    def ecart(x: float) -> float:
+        if parametre == "wacc":
+            return valoriser(h, d, x, **options)["valeur_action"] - cible
+        h_x = Hypotheses(**{**h.__dict__, parametre: x})
+        return valoriser(h_x, d, wacc_, **options)["valeur_action"] - cible
+
+    e_bas, e_haut = ecart(bas), ecart(haut)
+    if e_bas * e_haut > 0:                                 # pas de solution dans les bornes
+        return None
+    for _ in range(200):
+        milieu = (bas + haut) / 2
+        e_milieu = ecart(milieu)
+        if abs(e_milieu) < tolerance or haut - bas < 1e-10:
+            return milieu
+        if e_bas * e_milieu < 0:
+            haut = milieu
+        else:
+            bas, e_bas = milieu, e_milieu
+    return (bas + haut) / 2
 
 
 # ---------------------------------------------------------------------------

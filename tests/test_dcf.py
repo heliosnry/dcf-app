@@ -164,3 +164,37 @@ def test_loyers_reduisent_fcff(hyp, sg):
     hyp.loyers_ca = 0.01
     avec = projeter_fcff(hyp, sg)
     assert ((base - avec["FCFF"]) - avec["CA"] * 0.01).abs().max() < 1e-9
+
+
+# --- 4. Sensibilité croissance × marge et DCF inversé -----------------------
+
+def test_sensibilite_croissance_marge_excel(hyp, sg, params):
+    """Mêmes cases que le 2e tableau de sensibilité de l'Excel."""
+    from dcf import sensibilite_croissance_marge
+    t = sensibilite_croissance_marge(hyp, sg, wacc(params), [0.0125, 0.03], [0.115, 0.12])
+    assert t.loc[0.0125, 0.115] == pytest.approx(67.93, abs=0.01)
+    assert t.loc[0.0125, 0.12] == pytest.approx(72.12, abs=0.01)
+    assert t.loc[0.03, 0.115] == pytest.approx(74.64, abs=0.01)
+
+
+@pytest.mark.parametrize("parametre, attendu", [
+    ("croissance_ca", 0.0263), ("marge_ebit", 0.1213), ("wacc", 0.0984)])
+def test_dcf_inverse_saint_gobain(hyp, sg, params, parametre, attendu):
+    """Ce que le cours de 73,20 € suppose (conclusion de l'Excel)."""
+    from dcf import dcf_inverse
+    x = dcf_inverse(hyp, sg, wacc(params), parametre)
+    assert x == pytest.approx(attendu, abs=0.0005)
+
+
+def test_dcf_inverse_retrouve_le_cours(hyp, sg, params):
+    from dcf import dcf_inverse
+    w = wacc(params)
+    m = dcf_inverse(hyp, sg, w, "marge_ebit")
+    v = valoriser(Hypotheses(**{**hyp.__dict__, "marge_ebit": m}), sg, w)["valeur_action"]
+    assert v == pytest.approx(sg.cours, abs=0.001)
+
+
+def test_dcf_inverse_hors_bornes(hyp, sg, params):
+    """Un cours impossible à atteindre renvoie None au lieu d'un chiffre absurde."""
+    from dcf import dcf_inverse
+    assert dcf_inverse(hyp, sg, wacc(params), "croissance_ca", cible=10_000) is None
