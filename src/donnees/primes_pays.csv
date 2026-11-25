@@ -1,0 +1,169 @@
+pays,region,erp,crp,impot
+Angola,Africa,0.12644,0.08414,0.25
+Benin,Africa,0.10058,0.05828,0.3
+Botswana,Africa,0.06299,0.02069,0.22
+Burkina Faso,Africa,0.13938,0.09708,0.275
+Cameroon,Africa,0.13938,0.09708,0.33
+Cape Verde,Africa,0.11351,0.07121,0.2686
+Congo (Democratic Republic of),Africa,0.12644,0.08414,0.3
+Congo (Republic of),Africa,0.15885,0.11655,0.2686
+Côte d'Ivoire,Africa,0.08125,0.03895,0.25
+Egypt,Africa,0.13938,0.09708,0.225
+Ethiopia,Africa,0.15885,0.11655,0.3
+Gabon,Africa,0.15885,0.11655,0.3
+Ghana,Africa,0.13938,0.09708,0.25
+Kenya,Africa,0.13938,0.09708,0.3
+Mali,Africa,0.15885,0.11655,0.3
+Mauritius,Africa,0.07075,0.02845,0.15
+Morocco,Africa,0.07471,0.03241,0.33
+Mozambique,Africa,0.17179,0.12949,0.32
+Namibia,Africa,0.10058,0.05828,0.32
+Niger,Africa,0.17179,0.12949,0.3
+Nigeria,Africa,0.12644,0.08414,0.3
+Rwanda,Africa,0.11351,0.07121,0.28
+Senegal,Africa,0.13938,0.09708,0.3
+South Africa,Africa,0.08125,0.03895,0.27
+Swaziland,Africa,0.11351,0.07121,0.25
+Tanzania,Africa,0.10058,0.05828,0.3
+Togo,Africa,0.12644,0.08414,0.27
+Tunisia,Africa,0.13938,0.09708,0.15
+Uganda,Africa,0.12644,0.08414,0.3
+Zambia,Africa,0.15885,0.11655,0.3
+Bangladesh,Asia,0.11351,0.07121,0.275
+Cambodia,Asia,0.11351,0.07121,0.2
+China,Asia,0.05143,0.00913,0.25
+Fiji,Asia,0.10058,0.05828,0.25
+Hong Kong,Asia,0.05006,0.00776,0.165
+India,Asia,0.07075,0.02845,0.3
+Indonesia,Asia,0.06695,0.02465,0.22
+Japan,Asia,0.05143,0.00913,0.2974
+Korea,Asia,0.04869,0.00639,0.264
+Laos,Asia,0.15885,0.11655,0.2
+Macao,Asia,0.05006,0.00776,0.25
+Malaysia,Asia,0.05782,0.01552,0.24
+Maldives,Asia,0.15885,0.11655,0.15
+Mongolia,Asia,0.10058,0.05828,0.25
+Nepal,Asia,0.08886,0.04656,0.25
+Pakistan,Asia,0.13938,0.09708,0.29
+Papua New Guinea,Asia,0.11351,0.07121,0.3
+Philippines,Asia,0.06695,0.02465,0.25
+Singapore,Asia,0.0423,0.0,0.17
+Solomon Islands,Asia,0.13938,0.09708,0.3
+Sri Lanka,Asia,0.19765,0.15535,0.3
+Taiwan,Asia,0.05006,0.00776,0.2
+Thailand,Asia,0.06299,0.02069,0.2
+Vietnam,Asia,0.08125,0.03895,0.2
+Australia,Australia & New Zealand,0.0423,0.0,0.3
+Cook Islands,Australia & New Zealand,0.10058,0.05828,0.2
+New Zealand,Australia & New Zealand,0.0423,0.0,0.28
+Aruba,Caribbean,0.07075,0.02845,0.22
+Bahamas,Caribbean,0.10058,0.05828,0.0
+Barbados,Caribbean,0.11351,0.07121,0.09
+Bermuda,Caribbean,0.05326,0.01096,0.0
+Cayman Islands,Caribbean,0.05006,0.00776,0.0
+Cuba,Caribbean,0.19765,0.15535,0.35
+Curacao,Caribbean,0.07075,0.02845,0.22
+Dominican Republic,Caribbean,0.08125,0.03895,0.27
+Jamaica,Caribbean,0.08886,0.04656,0.25
+Montserrat,Caribbean,0.07075,0.02845,0.3
+St. Maarten,Caribbean,0.08125,0.03895,0.2
+St. Vincent & the Grenadines,Caribbean,0.12644,0.08414,0.28
+Trinidad and Tobago,Caribbean,0.08125,0.03895,0.3
+Turks and Caicos Islands,Caribbean,0.06299,0.02069,0.0
+Argentina,Central and South America,0.13938,0.09708,0.35
+Belize,Central and South America,0.13938,0.09708,0.0
+Bolivia,Central and South America,0.19765,0.15535,0.25
+Brazil,Central and South America,0.07471,0.03241,0.34
+Chile,Central and South America,0.05326,0.01096,0.27
+Colombia,Central and South America,0.07075,0.02845,0.35
+Costa Rica,Central and South America,0.08125,0.03895,0.3
+Ecuador,Central and South America,0.17179,0.12949,0.25
+El Salvador,Central and South America,0.12644,0.08414,0.3
+Guatemala,Central and South America,0.07471,0.03241,0.25
+Honduras,Central and South America,0.10058,0.05828,0.3
+Mexico,Central and South America,0.06695,0.02465,0.3
+Nicaragua,Central and South America,0.11351,0.07121,0.3
+Panama,Central and South America,0.07075,0.02845,0.25
+Paraguay,Central and South America,0.07075,0.02845,0.1
+Peru,Central and South America,0.06299,0.02069,0.295
+Suriname,Central and South America,0.13938,0.09708,0.36
+Uruguay,Central and South America,0.06299,0.02069,0.25
+Venezuela,Central and South America,0.30889,0.26659,0.34
+Albania,Eastern Europe & Russia,0.08886,0.04656,0.15
+Armenia,Eastern Europe & Russia,0.08886,0.04656,0.18
+Azerbaijan,Eastern Europe & Russia,0.07075,0.02845,0.2
+Belarus,Eastern Europe & Russia,0.30889,0.26659,0.25
+Bosnia and Herzegovina,Eastern Europe & Russia,0.12644,0.08414,0.1
+Bulgaria,Eastern Europe & Russia,0.06299,0.02069,0.1
+Croatia,Eastern Europe & Russia,0.05782,0.01552,0.18
+Czech Republic,Eastern Europe & Russia,0.05006,0.00776,0.21
+Estonia,Eastern Europe & Russia,0.05143,0.00913,0.2
+Georgia,Eastern Europe & Russia,0.08125,0.03895,0.15
+Hungary,Eastern Europe & Russia,0.06695,0.02465,0.09
+Kazakhstan,Eastern Europe & Russia,0.06299,0.02069,0.2
+Kyrgyzstan,Eastern Europe & Russia,0.12644,0.08414,0.1
+Latvia,Eastern Europe & Russia,0.05782,0.01552,0.2
+Lithuania,Eastern Europe & Russia,0.05326,0.01096,0.15
+Macedonia,Eastern Europe & Russia,0.08886,0.04656,0.1
+Moldova,Eastern Europe & Russia,0.12644,0.08414,0.12
+Montenegro,Eastern Europe & Russia,0.10058,0.05828,0.15
+Poland,Eastern Europe & Russia,0.05326,0.01096,0.19
+Romania,Eastern Europe & Russia,0.07075,0.02845,0.16
+Serbia,Eastern Europe & Russia,0.08125,0.03895,0.15
+Slovakia,Eastern Europe & Russia,0.05782,0.01552,0.21
+Slovenia,Eastern Europe & Russia,0.05782,0.01552,0.22
+Tajikistan,Eastern Europe & Russia,0.12644,0.08414,0.18
+Ukraine,Eastern Europe & Russia,0.19765,0.15535,0.18
+Uzbekistan,Eastern Europe & Russia,0.08886,0.04656,0.15
+Abu Dhabi,Middle East,0.04869,0.00639,0.09
+Bahrain,Middle East,0.11351,0.07121,0.0
+Iraq,Middle East,0.13938,0.09708,0.15
+Israel,Middle East,0.06299,0.02069,0.23
+Jordan,Middle East,0.08886,0.04656,0.2
+Kuwait,Middle East,0.05143,0.00913,0.15
+Lebanon,Middle East,0.30889,0.26659,0.17
+Oman,Middle East,0.07075,0.02845,0.15
+Qatar,Middle East,0.04869,0.00639,0.1
+Ras Al Khaimah (Emirate of),Middle East,0.05782,0.01552,0.1894
+Saudi Arabia,Middle East,0.05006,0.00776,0.2
+Sharjah,Middle East,0.07471,0.03241,0.1894
+United Arab Emirates,Middle East,0.04869,0.00639,0.09
+Canada,North America,0.0423,0.0,0.2614
+United States,North America,0.04463,0.00233,0.25
+Andorra (Principality of),Western Europe,0.06299,0.02069,0.1
+Austria,Western Europe,0.04586,0.00356,0.23
+Belgium,Western Europe,0.05006,0.00776,0.25
+Cyprus,Western Europe,0.05782,0.01552,0.125
+Denmark,Western Europe,0.0423,0.0,0.22
+Finland,Western Europe,0.04586,0.00356,0.2
+France,Western Europe,0.05006,0.00776,0.2583
+Germany,Western Europe,0.0423,0.0,0.2993
+Greece,Western Europe,0.07075,0.02845,0.22
+Guernsey (States of),Western Europe,0.05143,0.00913,0.0
+Iceland,Western Europe,0.05143,0.00913,0.21
+Ireland,Western Europe,0.05006,0.00776,0.125
+Isle of Man,Western Europe,0.05006,0.00776,0.0
+Italy,Western Europe,0.06695,0.02465,0.2781
+Jersey (States of),Western Europe,0.05006,0.00776,0.0
+Liechtenstein,Western Europe,0.0423,0.0,0.125
+Luxembourg,Western Europe,0.0423,0.0,0.2494
+Malta,Western Europe,0.05326,0.01096,0.35
+Netherlands,Western Europe,0.0423,0.0,0.258
+Norway,Western Europe,0.0423,0.0,0.22
+Portugal,Western Europe,0.05782,0.01552,0.315
+Spain,Western Europe,0.05782,0.01552,0.25
+Sweden,Western Europe,0.0423,0.0,0.206
+Switzerland,Western Europe,0.0423,0.0,0.1961
+Turkey,Western Europe,0.10058,0.05828,0.25
+United Kingdom,Western Europe,0.05006,0.00776,0.25
+Region,Weight *ERP,,,
+Africa,0.002599847960682259,0.2739,2340875.22921,0.02176
+Asia,0.018472481789665006,0.25655,34731689.37481,0.32281
+Australia & New Zealand,0.0007943984357090377,0.29735,2018608.83675,0.01876
+Caribbean,0.00037880514790762404,0.26527,347814.13247,0.00323
+Central and South America,0.005143050712557768,0.31547,6538486.85585,0.06077
+Eastern Europe,0.0024590879778754356,0.17637,3491477.19314,0.03245
+Middle East,0.0020665342265945965,0.1612,3565018.31247,0.03314
+North America,0.012809397654767369,0.25083,30994592.95736,0.28808
+Western Europe,0.011533469394703823,0.25557,23561725.63515,0.21899
+Global,0.05625707330046293,0.25368,107590288.52721,1.0

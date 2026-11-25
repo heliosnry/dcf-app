@@ -4,64 +4,74 @@ dcf.py — Moteur de valorisation DCF (méthode FCFF)
 Traduction en Python du modèle Excel « CP_Saint_Gobain.xlsx ».
 Toutes les fonctions sont pures : elles reçoivent des nombres et renvoient
 des nombres, sans aller chercher de données. La récupération des données
-(yfinance) sera dans data.py, l'interface dans app.py.
+(yfinance) est dans data.py, l'interface dans app.py.
 
-Montants en millions d'euros, taux en décimal (0.02 = 2 %).
+Montants en millions (dans la devise de l'entreprise), taux en décimal (0.02 = 2 %).
 """
 
 from dataclasses import dataclass
 
 import pandas as pd
 
-
 # ---------------------------------------------------------------------------
 # 1. Les entrées du modèle
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Hypotheses:
     """Hypothèses opérationnelles (onglet Hypothèses de l'Excel)."""
-    croissance_ca: float      # croissance annuelle du CA
-    marge_ebit: float         # EBIT / CA
-    da_ca: float              # D&A / CA
-    capex_ca: float           # Capex / CA
-    bfr_ca: float             # BFR / CA (niveau, pas variation)
-    taux_is: float            # taux d'impôt
-    g: float                  # croissance à l'infini
-    horizon: int = 5          # nombre d'années projetées
-    loyers_ca: float = 0.0    # IFRS 16 : renouvellement des contrats de location / CA
-    roic_terminal: float | None = None   # None = Gordon classique ; sinon formule ROIC
-    mi_annee: bool = False    # convention de milieu d'année pour l'actualisation
+
+    croissance_ca: float  # croissance annuelle du CA
+    marge_ebit: float  # EBIT / CA
+    da_ca: float  # D&A / CA
+    capex_ca: float  # Capex / CA
+    bfr_ca: float  # BFR / CA (niveau, pas variation)
+    taux_is: float  # taux d'impôt
+    g: float  # croissance à l'infini
+    horizon: int = 5  # nombre d'années projetées
+    # IFRS 16 : déduit du FCFF dans les deux traitements (renouvellement des contrats si
+    # « loyers = dette », loyers payés si « loyers = charge »), en % du CA
+    loyers_ca: float = 0.0
+    roic_terminal: float | None = None  # None = Gordon classique ; sinon formule ROIC
+    mi_annee: bool = False  # convention de milieu d'année pour l'actualisation
+    annees_transition: int = 0  # phase 2 : la croissance glisse en ligne droite vers g
 
 
 @dataclass
 class DonneesEntreprise:
     """Données historiques et de marché (onglet Données historique)."""
-    ca_dernier: float         # CA de la dernière année publiée
-    bfr_dernier: float        # BFR de la dernière année publiée
-    annee_derniere: int       # ex. 2025
-    dette_nette: float        # dettes locatives IFRS 16 comprises si Yahoo les inclut
+
+    ca_dernier: float  # CA de la dernière année publiée
+    bfr_dernier: float  # BFR de la dernière année publiée
+    annee_derniere: int  # ex. 2025
+    dette_nette: float  # dettes locatives IFRS 16 comprises si elles sont traitées comme dette
     minoritaires: float
     provisions_retraites: float
-    nb_actions: float         # en millions
-    cours: float              # en euros
+    nb_actions: float  # en millions
+    cours: float  # dans la devise de cotation
+    participations: float = 0.0  # sociétés mises en équivalence : s'AJOUTENT à la VE
+    autres_dettes: float = 0.0  # hybrides, affacturage, convertibles… : se RETIRENT de la VE
+    actions_dilutives: float = 0.0  # en millions : stock-options, actions gratuites, convertibles
 
 
 @dataclass
 class ParametresWACC:
     """Paramètres du coût du capital."""
-    taux_sans_risque: float   # TEC 10
+
+    taux_sans_risque: float  # taux d'État à 10 ans de la devise
     beta: float
-    prime_risque: float       # prime de risque marché
-    kd: float                 # coût de la dette avant impôt (TEC 10 + spread)
+    prime_risque: float  # prime de risque totale du pays (marché mature + risque pays)
+    kd: float  # coût de la dette avant impôt (taux sans risque + spread)
     taux_is: float
-    capitalisation: float     # E
-    dette: float              # D
+    capitalisation: float  # E
+    dette: float  # D = max(dette nette ; 0) + autres dettes (hybrides)
 
 
 # ---------------------------------------------------------------------------
 # 2. Coût du capital
 # ---------------------------------------------------------------------------
+
 
 def cout_fonds_propres(rf: float, beta: float, prime: float) -> float:
     """MEDAF : Ke = rf + bêta × prime de risque."""
@@ -76,23 +86,48 @@ def wacc(p: ParametresWACC) -> float:
     return poids_e * ke + poids_d * p.kd * (1 - p.taux_is)
 
 
+def desendetter_beta(beta_endette: float, dette_sur_fp: float, taux_is: float) -> float:
+    """Hamada : bêta de l'activité seule, sans l'effet de la dette.
+    βU = βL / (1 + (1 − t) × D/E)."""
+    return beta_endette / (1 + (1 - taux_is) * dette_sur_fp)
+
+
+def reendetter_beta(beta_desendette: float, dette_sur_fp: float, taux_is: float) -> float:
+    """Hamada : bêta de l'actionnaire, compte tenu de la dette de l'entreprise.
+    βL = βU × (1 + (1 − t) × D/E). Plus il y a de dette, plus l'actionnaire est exposé."""
+    return beta_desendette * (1 + (1 - taux_is) * dette_sur_fp)
+
+
 # ---------------------------------------------------------------------------
 # 3. Projection des flux
 # ---------------------------------------------------------------------------
 
+
+def croissance_annee(h: Hypotheses, n: int) -> float:
+    """Croissance du CA de l'année n. Phase 1 (1 à horizon) : croissance retenue.
+    Phase 2 (transition) : elle glisse en ligne droite vers g, pour ne pas passer
+    brutalement d'une forte croissance à la croissance perpétuelle."""
+    if n <= h.horizon:
+        return h.croissance_ca
+    k = n - h.horizon
+    return h.croissance_ca + (h.g - h.croissance_ca) * k / (h.annees_transition + 1)
+
+
 def projeter_fcff(h: Hypotheses, d: DonneesEntreprise) -> pd.DataFrame:
     """
-    Projette le compte de résultat simplifié et les FCFF sur l'horizon.
+    Projette le compte de résultat simplifié et les FCFF sur l'horizon
+    (+ les années de transition éventuelles).
     Renvoie un tableau avec une ligne par année (comme l'onglet DCF).
 
-    FCFF = NOPAT + D&A − Capex − ΔBFR
+    FCFF = NOPAT + D&A − Capex − ΔBFR − loyers
     """
     lignes = []
     ca_prec = d.ca_dernier
     bfr_prec = d.bfr_dernier
 
-    for n in range(1, h.horizon + 1):
-        ca = ca_prec * (1 + h.croissance_ca)
+    for n in range(1, h.horizon + h.annees_transition + 1):
+        croissance = croissance_annee(h, n)
+        ca = ca_prec * (1 + croissance)
         ebit = ca * h.marge_ebit
         nopat = ebit * (1 - h.taux_is)
         da = ca * h.da_ca
@@ -102,19 +137,22 @@ def projeter_fcff(h: Hypotheses, d: DonneesEntreprise) -> pd.DataFrame:
         loyers = ca * h.loyers_ca
         fcff = nopat + da - capex - delta_bfr - loyers
 
-        lignes.append({
-            "n": n,
-            "annee": d.annee_derniere + n,
-            "CA": ca,
-            "EBIT": ebit,
-            "NOPAT": nopat,
-            "D&A": da,
-            "Capex": capex,
-            "BFR": bfr,
-            "ΔBFR": delta_bfr,
-            "Loyers IFRS 16": loyers,
-            "FCFF": fcff,
-        })
+        lignes.append(
+            {
+                "n": n,
+                "annee": d.annee_derniere + n,
+                "Croissance": croissance,
+                "CA": ca,
+                "EBIT": ebit,
+                "NOPAT": nopat,
+                "D&A": da,
+                "Capex": capex,
+                "BFR": bfr,
+                "ΔBFR": delta_bfr,
+                "Loyers IFRS 16": loyers,
+                "FCFF": fcff,
+            }
+        )
         ca_prec, bfr_prec = ca, bfr
 
     return pd.DataFrame(lignes).set_index("annee")
@@ -123,6 +161,7 @@ def projeter_fcff(h: Hypotheses, d: DonneesEntreprise) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 4. Valorisation
 # ---------------------------------------------------------------------------
+
 
 def valeur_terminale(fcff_final: float, wacc_: float, g: float) -> float:
     """Gordon-Shapiro : VT = FCFF_N × (1 + g) / (WACC − g), en valeur de l'année N."""
@@ -143,8 +182,13 @@ def valeur_terminale_roic(nopat_final: float, wacc_: float, g: float, roic: floa
     return nopat_final * (1 + g) * (1 - g / roic) / (wacc_ - g)
 
 
-def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
-              decalage: float = 0.0, dividendes_par_action: float = 0.0) -> dict:
+def valoriser(
+    h: Hypotheses,
+    d: DonneesEntreprise,
+    wacc_: float,
+    decalage: float = 0.0,
+    dividendes_par_action: float = 0.0,
+) -> dict:
     """
     Calcule toute la chaîne : FCFF actualisés, VT, VE, fonds propres,
     valeur par action et potentiel. Renvoie un dictionnaire de résultats.
@@ -164,12 +208,14 @@ def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
         vt = valeur_terminale(dernier["FCFF"], wacc_, h.g)
     else:
         vt = valeur_terminale_roic(dernier["NOPAT"], wacc_, h.g, h.roic_terminal)
-    vt_actu = vt / (1 + wacc_) ** (h.horizon - 0.5 if h.mi_annee else h.horizon)
+    n_final = int(dernier["n"])  # horizon + transition
+    vt_actu = vt / (1 + wacc_) ** (n_final - 0.5 if h.mi_annee else n_final)
 
     # ROIC implicite de la VT : g / taux de réinvestissement de la dernière année
     reinvesti = dernier["Capex"] - dernier["D&A"] + dernier["ΔBFR"] + dernier["Loyers IFRS 16"]
-    taux_reinvestissement = (reinvesti / dernier["NOPAT"] if dernier["NOPAT"] > 0
-                             else float("nan"))          # NOPAT nul ou négatif : ratio sans sens
+    taux_reinvestissement = (
+        reinvesti / dernier["NOPAT"] if dernier["NOPAT"] > 0 else float("nan")
+    )  # NOPAT nul ou négatif : ratio sans sens
     if h.roic_terminal is not None:
         roic_implicite = h.roic_terminal
     elif pd.isna(taux_reinvestissement):
@@ -177,13 +223,19 @@ def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
     elif taux_reinvestissement > 0:
         roic_implicite = h.g / taux_reinvestissement
     else:
-        roic_implicite = float("inf")   # croissance sans aucun réinvestissement
+        roic_implicite = float("inf")  # croissance sans aucun réinvestissement
 
     ve_cloture = somme_fcff_actu + vt_actu
     ve = ve_cloture * (1 + wacc_) ** decalage
-    passif = d.dette_nette + d.minoritaires + d.provisions_retraites
+    # Pont VE → fonds propres : on retire tout ce qui revient à d'autres que les actionnaires
+    # (prêteurs, minoritaires, salariés retraités, porteurs d'hybrides) et on ajoute les actifs
+    # dont les flux ne sont pas dans le FCFF (participations mises en équivalence).
+    passif = (
+        d.dette_nette + d.minoritaires + d.provisions_retraites + d.autres_dettes - d.participations
+    )
     fonds_propres = ve - passif - dividendes_par_action * d.nb_actions
-    valeur_action = fonds_propres / d.nb_actions
+    nb_dilue = d.nb_actions + d.actions_dilutives
+    valeur_action = fonds_propres / nb_dilue
 
     return {
         "projection": proj,
@@ -196,7 +248,7 @@ def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
         "part_vt": vt_actu / ve_cloture,
         "fonds_propres": fonds_propres,
         "valeur_action": valeur_action,
-        "valeur_action_cloture": (ve_cloture - passif) / d.nb_actions,
+        "valeur_action_cloture": (ve_cloture - passif) / nb_dilue,
         "potentiel": valeur_action / d.cours - 1,
         "taux_reinvestissement": taux_reinvestissement,
         "roic_implicite": roic_implicite,
@@ -207,8 +259,10 @@ def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
 # 5. Sensibilité
 # ---------------------------------------------------------------------------
 
-def sensibilite_wacc_g(h: Hypotheses, d: DonneesEntreprise,
-                       waccs: list[float], gs: list[float], **options) -> pd.DataFrame:
+
+def sensibilite_wacc_g(
+    h: Hypotheses, d: DonneesEntreprise, waccs: list[float], gs: list[float], **options
+) -> pd.DataFrame:
     """Tableau de la valeur par action : WACC en lignes, g en colonnes.
     options : decalage, dividendes_par_action (transmis à valoriser)."""
     tableau = {}
@@ -218,14 +272,26 @@ def sensibilite_wacc_g(h: Hypotheses, d: DonneesEntreprise,
     return pd.DataFrame(tableau, index=waccs)
 
 
-def sensibilite_croissance_marge(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
-                                 croissances: list[float], marges: list[float],
-                                 **options) -> pd.DataFrame:
+def sensibilite_croissance_marge(
+    h: Hypotheses,
+    d: DonneesEntreprise,
+    wacc_: float,
+    croissances: list[float],
+    marges: list[float],
+    **options,
+) -> pd.DataFrame:
     """Tableau de la valeur par action : croissance du CA en lignes, marge EBIT en colonnes."""
     tableau = {}
     for m in marges:
-        tableau[m] = [valoriser(Hypotheses(**{**h.__dict__, "croissance_ca": c, "marge_ebit": m}),
-                                d, wacc_, **options)["valeur_action"] for c in croissances]
+        tableau[m] = [
+            valoriser(
+                Hypotheses(**{**h.__dict__, "croissance_ca": c, "marge_ebit": m}),
+                d,
+                wacc_,
+                **options,
+            )["valeur_action"]
+            for c in croissances
+        ]
     return pd.DataFrame(tableau, index=croissances)
 
 
@@ -236,8 +302,15 @@ def sensibilite_croissance_marge(h: Hypotheses, d: DonneesEntreprise, wacc_: flo
 BORNES_INVERSE = {"croissance_ca": (-0.10, 0.30), "marge_ebit": (0.0, 0.60), "wacc": (None, 0.30)}
 
 
-def dcf_inverse(h: Hypotheses, d: DonneesEntreprise, wacc_: float, parametre: str,
-                cible: float | None = None, tolerance: float = 1e-6, **options) -> float | None:
+def dcf_inverse(
+    h: Hypotheses,
+    d: DonneesEntreprise,
+    wacc_: float,
+    parametre: str,
+    cible: float | None = None,
+    tolerance: float = 1e-6,
+    **options,
+) -> float | None:
     """
     Cherche la valeur du paramètre (« croissance_ca », « marge_ebit » ou « wacc ») pour laquelle
     la valeur par action égale la cible (le cours, par défaut), toutes les autres hypothèses
@@ -247,16 +320,17 @@ def dcf_inverse(h: Hypotheses, d: DonneesEntreprise, wacc_: float, parametre: st
     cible = d.cours if cible is None else cible
     bas, haut = BORNES_INVERSE[parametre]
     if parametre == "wacc":
-        bas = h.g + 0.005                                  # le WACC doit rester > g
+        bas = h.g + 0.005  # le WACC doit rester > g
 
     def ecart(x: float) -> float:
+        """Valeur par action obtenue avec le paramètre égal à x, moins la cible."""
         if parametre == "wacc":
             return valoriser(h, d, x, **options)["valeur_action"] - cible
         h_x = Hypotheses(**{**h.__dict__, parametre: x})
         return valoriser(h_x, d, wacc_, **options)["valeur_action"] - cible
 
     e_bas, e_haut = ecart(bas), ecart(haut)
-    if e_bas * e_haut > 0:                                 # pas de solution dans les bornes
+    if e_bas * e_haut > 0:  # pas de solution dans les bornes
         return None
     for _ in range(200):
         milieu = (bas + haut) / 2
@@ -275,19 +349,37 @@ def dcf_inverse(h: Hypotheses, d: DonneesEntreprise, wacc_: float, parametre: st
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import sys
+
+    sys.stdout.reconfigure(encoding="utf-8")  # console Windows : caractères « Δ », « € »
     hyp = Hypotheses(
-        croissance_ca=0.0125, marge_ebit=0.115, da_ca=0.04, capex_ca=0.0425,
-        bfr_ca=0.021, taux_is=0.26, g=0.02, horizon=5,
+        croissance_ca=0.0125,
+        marge_ebit=0.115,
+        da_ca=0.04,
+        capex_ca=0.0425,
+        bfr_ca=0.021,
+        taux_is=0.26,
+        g=0.02,
+        horizon=5,
     )
     sg = DonneesEntreprise(
-        ca_dernier=46483, bfr_dernier=968, annee_derniere=2025,
-        dette_nette=10356, minoritaires=568, provisions_retraites=1444,
-        nb_actions=489.9, cours=73.20,
+        ca_dernier=46483,
+        bfr_dernier=968,
+        annee_derniere=2025,
+        dette_nette=10356,
+        minoritaires=568,
+        provisions_retraites=1444,
+        nb_actions=489.9,
+        cours=73.20,
     )
     params = ParametresWACC(
-        taux_sans_risque=0.0483, beta=1.428, prime_risque=0.0501,
-        kd=0.0483 + 0.0111, taux_is=0.26,
-        capitalisation=489.9 * 73.20, dette=10356,
+        taux_sans_risque=0.0483,
+        beta=1.428,
+        prime_risque=0.0501,
+        kd=0.0483 + 0.0111,
+        taux_is=0.26,
+        capitalisation=489.9 * 73.20,
+        dette=10356,
     )
 
     w = wacc(params)
@@ -302,8 +394,9 @@ if __name__ == "__main__":
     print(f"Valeur par action : {res['valeur_action']:.2f} €   (Excel : 67,93 €)")
     print(f"Potentiel         : {res['potentiel']:.1%}")
     print()
-    sens = sensibilite_wacc_g(hyp, sg, [0.093, 0.098, 0.103, 0.108, 0.113],
-                              [0.015, 0.0175, 0.02, 0.0225, 0.025])
+    sens = sensibilite_wacc_g(
+        hyp, sg, [0.093, 0.098, 0.103, 0.108, 0.113], [0.015, 0.0175, 0.02, 0.0225, 0.025]
+    )
     sens.index = [f"WACC {x:.2%}" for x in sens.index]
     sens.columns = [f"g {x:.2%}" for x in sens.columns]
     pd.options.display.float_format = "{:.2f}".format

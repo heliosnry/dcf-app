@@ -6,33 +6,67 @@ Référence : le modèle Excel CP_Saint_Gobain.xlsx (scénario central).
 
 import pytest
 
-from dcf import (DonneesEntreprise, Hypotheses, ParametresWACC,
-                 cout_fonds_propres, projeter_fcff, sensibilite_wacc_g,
-                 valeur_terminale, valoriser, wacc)
-
+from dcf import (
+    DonneesEntreprise,
+    Hypotheses,
+    ParametresWACC,
+    cout_fonds_propres,
+    projeter_fcff,
+    sensibilite_wacc_g,
+    valeur_terminale,
+    valoriser,
+    wacc,
+)
 
 # --- Données Saint-Gobain (scénario central de l'Excel) ---------------------
 
+
 @pytest.fixture
 def hyp():
-    return Hypotheses(croissance_ca=0.0125, marge_ebit=0.115, da_ca=0.04,
-                      capex_ca=0.0425, bfr_ca=0.021, taux_is=0.26, g=0.02, horizon=5)
+    """Hypothèses opérationnelles du scénario central de l'Excel."""
+    return Hypotheses(
+        croissance_ca=0.0125,
+        marge_ebit=0.115,
+        da_ca=0.04,
+        capex_ca=0.0425,
+        bfr_ca=0.021,
+        taux_is=0.26,
+        g=0.02,
+        horizon=5,
+    )
 
 
 @pytest.fixture
 def sg():
-    return DonneesEntreprise(ca_dernier=46483, bfr_dernier=968, annee_derniere=2025,
-                             dette_nette=10356, minoritaires=568, provisions_retraites=1444,
-                             nb_actions=489.9, cours=73.20)
+    """Données de Saint-Gobain (rapport annuel 2025)."""
+    return DonneesEntreprise(
+        ca_dernier=46483,
+        bfr_dernier=968,
+        annee_derniere=2025,
+        dette_nette=10356,
+        minoritaires=568,
+        provisions_retraites=1444,
+        nb_actions=489.9,
+        cours=73.20,
+    )
 
 
 @pytest.fixture
 def params():
-    return ParametresWACC(taux_sans_risque=0.0483, beta=1.428, prime_risque=0.0501,
-                          kd=0.0594, taux_is=0.26, capitalisation=489.9 * 73.20, dette=10356)
+    """Paramètres du WACC de l'Excel (OAT 4,83 %, prime 5,01 %)."""
+    return ParametresWACC(
+        taux_sans_risque=0.0483,
+        beta=1.428,
+        prime_risque=0.0501,
+        kd=0.0594,
+        taux_is=0.26,
+        capitalisation=489.9 * 73.20,
+        dette=10356,
+    )
 
 
 # --- 1. On retrouve les chiffres de l'Excel ---------------------------------
+
 
 def test_ke(params):
     assert cout_fonds_propres(0.0483, 1.428, 0.0501) == pytest.approx(0.11984, abs=1e-5)
@@ -57,8 +91,9 @@ def test_valeur_par_action_excel(hyp, sg, params):
 
 # --- 2. Règles de cohérence (vraies pour toute entreprise) ------------------
 
+
 def test_fcff_egal_formule(hyp, sg):
-    """FCFF = NOPAT + D&A − Capex − ΔBFR, chaque année."""
+    """FCFF = NOPAT + D&A − Capex − ΔBFR (− loyers, nuls ici), chaque année."""
     p = projeter_fcff(hyp, sg)
     attendu = p["NOPAT"] + p["D&A"] - p["Capex"] - p["ΔBFR"]
     assert (p["FCFF"] - attendu).abs().max() < 1e-9
@@ -105,6 +140,7 @@ def test_sensibilite_coherente(hyp, sg):
 
 # --- 3. Options de méthode (revue d'analyste) -------------------------------
 
+
 def test_options_par_defaut_inchangees(hyp, sg, params):
     """Sans option, on retrouve exactement l'Excel."""
     res = valoriser(hyp, sg, wacc(params), decalage=0.0, dividendes_par_action=0.0)
@@ -120,6 +156,7 @@ def test_roic_implicite_saint_gobain(hyp, sg, params):
 
 def test_vt_roic_formule(hyp, sg):
     from dcf import valeur_terminale_roic
+
     vt = valeur_terminale_roic(4000, wacc_=0.10, g=0.02, roic=0.12)
     assert vt == pytest.approx(4000 * 1.02 * (1 - 0.02 / 0.12) / 0.08)
 
@@ -168,26 +205,31 @@ def test_loyers_reduisent_fcff(hyp, sg):
 
 # --- 4. Sensibilité croissance × marge et DCF inversé -----------------------
 
+
 def test_sensibilite_croissance_marge_excel(hyp, sg, params):
     """Mêmes cases que le 2e tableau de sensibilité de l'Excel."""
     from dcf import sensibilite_croissance_marge
+
     t = sensibilite_croissance_marge(hyp, sg, wacc(params), [0.0125, 0.03], [0.115, 0.12])
     assert t.loc[0.0125, 0.115] == pytest.approx(67.93, abs=0.01)
     assert t.loc[0.0125, 0.12] == pytest.approx(72.12, abs=0.01)
     assert t.loc[0.03, 0.115] == pytest.approx(74.64, abs=0.01)
 
 
-@pytest.mark.parametrize("parametre, attendu", [
-    ("croissance_ca", 0.0263), ("marge_ebit", 0.1213), ("wacc", 0.0984)])
+@pytest.mark.parametrize(
+    "parametre, attendu", [("croissance_ca", 0.0263), ("marge_ebit", 0.1213), ("wacc", 0.0984)]
+)
 def test_dcf_inverse_saint_gobain(hyp, sg, params, parametre, attendu):
     """Ce que le cours de 73,20 € suppose (conclusion de l'Excel)."""
     from dcf import dcf_inverse
+
     x = dcf_inverse(hyp, sg, wacc(params), parametre)
     assert x == pytest.approx(attendu, abs=0.0005)
 
 
 def test_dcf_inverse_retrouve_le_cours(hyp, sg, params):
     from dcf import dcf_inverse
+
     w = wacc(params)
     m = dcf_inverse(hyp, sg, w, "marge_ebit")
     v = valoriser(Hypotheses(**{**hyp.__dict__, "marge_ebit": m}), sg, w)["valeur_action"]
@@ -197,4 +239,65 @@ def test_dcf_inverse_retrouve_le_cours(hyp, sg, params):
 def test_dcf_inverse_hors_bornes(hyp, sg, params):
     """Un cours impossible à atteindre renvoie None au lieu d'un chiffre absurde."""
     from dcf import dcf_inverse
+
     assert dcf_inverse(hyp, sg, wacc(params), "croissance_ca", cible=10_000) is None
+
+
+# --- 5. Revue de méthode du 25/11/2026 ---------------------------------------
+
+
+def test_options_nouvelles_neutres_par_defaut(hyp, sg, params):
+    """Transition, participations, autres dettes et dilution à 0 : on retrouve l'Excel."""
+    res = valoriser(Hypotheses(**{**hyp.__dict__, "annees_transition": 0}), sg, wacc(params))
+    assert res["valeur_action"] == pytest.approx(67.93, abs=0.01)
+
+
+def test_transition_glisse_vers_g(hyp, sg):
+    """Phase 2 : la croissance passe en ligne droite de 5 % à g = 2 % sur 3 ans (4,25 / 3,5 / 2,75)."""
+    from dcf import croissance_annee
+
+    h = Hypotheses(**{**hyp.__dict__, "croissance_ca": 0.05, "annees_transition": 3})
+    p = projeter_fcff(h, sg)
+    assert len(p) == 8
+    assert list(p["Croissance"].round(4)) == [0.05] * 5 + [0.0425, 0.035, 0.0275]
+    assert croissance_annee(h, 9) == pytest.approx(0.02)  # rejoint g juste après la transition
+
+
+def test_transition_actualise_la_vt_a_la_bonne_annee(hyp, sg):
+    """Avec 8 années projetées, la VT est actualisée sur 8 ans, pas sur l'horizon de 5 ans."""
+    h = Hypotheses(**{**hyp.__dict__, "annees_transition": 3})
+    res = valoriser(h, sg, 0.10)
+    assert res["vt_actu"] == pytest.approx(res["vt"] / 1.10**8)
+
+
+def test_pont_fonds_propres_complet(hyp, sg, params):
+    """Participations ajoutées, autres dettes retirées, division par les actions diluées."""
+    from dataclasses import replace
+
+    w = wacc(params)
+    base = valoriser(hyp, sg, w)
+    d = replace(sg, participations=800, autres_dettes=300, actions_dilutives=4.1)
+    res = valoriser(hyp, d, w)
+    assert res["fonds_propres"] == pytest.approx(base["fonds_propres"] + 800 - 300)
+    assert res["valeur_action"] == pytest.approx(res["fonds_propres"] / (489.9 + 4.1))
+
+
+def test_hamada_aller_retour():
+    """Désendetter puis réendetter avec la même structure redonne le bêta de départ."""
+    from dcf import desendetter_beta, reendetter_beta
+
+    bu = desendetter_beta(1.2, 0.5, 0.25)
+    assert bu == pytest.approx(1.2 / (1 + 0.75 * 0.5))
+    assert reendetter_beta(bu, 0.5, 0.25) == pytest.approx(1.2)
+    # Orange : secteur télécom 0,447, D/E 42 %, impôt 25,8 % → ≈ 0,59
+    assert reendetter_beta(0.447, 0.42, 0.258) == pytest.approx(0.586, abs=0.005)
+
+
+def test_vt_roic_egale_wacc_neutralise_la_croissance(hyp, sg):
+    """Normalisation de l'année terminale : si ROIC = WACC, la valeur ne dépend plus de g
+    (la croissance coûte exactement ce qu'elle rapporte)."""
+    h1 = Hypotheses(**{**hyp.__dict__, "roic_terminal": 0.09, "g": 0.01})
+    h2 = Hypotheses(**{**hyp.__dict__, "roic_terminal": 0.09, "g": 0.03})
+    assert valoriser(h1, sg, 0.09)["vt"] / 1.01 == pytest.approx(
+        valoriser(h2, sg, 0.09)["vt"] / 1.03
+    )

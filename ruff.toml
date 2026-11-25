@@ -1,0 +1,14 @@
+# Configuration ruff (analyse et mise en forme du code) : ruff check src tests · ruff format src tests
+line-length = 100
+target-version = "py311"
+
+[lint]
+extend-select = ["I"]          # imports triés
+ignore = [
+    # Les appels Yahoo Finance lèvent des erreurs de types très variés (réseau, limite de requêtes,
+    # champ absent, format changé) : on les intercepte toutes pour que l'appli continue sans
+    # planter, en passant à l'entreprise suivante ou en renvoyant « donnée absente ».
+    "BLE001",  # except Exception
+    "S110",    # try / except / pass
+    "S112",    # try / except / continue
+]

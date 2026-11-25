@@ -1,6 +1,7 @@
-pandas
-yfinance
-streamlit
-altair
-openpyxl
-pytest
+# Dépendances de l'application (installées par Streamlit Community Cloud).
+# Versions figées : une mise à jour de yfinance ou de Streamlit ne casse pas l'appli en ligne.
+pandas==3.1.1
+yfinance==1.8.0
+streamlit==1.67.0
+altair==6.3.0
+openpyxl==3.1.5
