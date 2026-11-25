@@ -239,5 +239,5 @@ if __name__ == "__main__":
     print(f"\nWACC {w:.2%}  ·  VE {res['ve']:,.0f}  ·  part VT {res['part_vt']:.0%}")
     print(f"Valeur par action : {res['valeur_action']:.2f}  (cours {m['cours']:.2f}, "
           f"potentiel {res['potentiel']:.1%})")
-    print("\n⚠ Hypothèses par défaut = moyennes historiques, provisions retraites = 0. "
+    print("\n⚠ Hypothèses par défaut = moyenness historiques, provisions retraites = 0. "
           "À ajuster avant de conclure.")
