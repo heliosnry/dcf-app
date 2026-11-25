@@ -1,8 +1,19 @@
+[project]
+name = "dcf-app"
+version = "0.1.0"
+description = "Valorisation d'actions par DCF (méthode FCFF) : données Yahoo Finance, interface Streamlit, export Excel avec formules"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
 # Configuration ruff (analyse et mise en forme du code) : ruff check src tests · ruff format src tests
+[tool.ruff]
 line-length = 100
 target-version = "py311"
 
-[lint]
+[tool.ruff.lint]
 extend-select = ["I"]          # imports triés
 ignore = [
     # Les appels Yahoo Finance lèvent des erreurs de types très variés (réseau, limite de requêtes,
