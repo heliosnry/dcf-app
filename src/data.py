@@ -23,6 +23,27 @@ from dcf import DonneesEntreprise, Hypotheses, ParametresWACC, valoriser, wacc
 INDICES = {".PA": "^FCHI", ".DE": "^GDAXI", ".AS": "^AEX", ".MI": "FTSEMIB.MI",
            ".L": "^FTSE", ".MC": "^IBEX", "": "^GSPC"}
 
+# Note synthétique de Damodaran (janvier 2026), grandes entreprises non financières :
+# couverture des intérêts (EBIT / charges d'intérêts) → note → spread de crédit
+TABLE_NOTES = [  # (couverture minimale, note, spread)
+    (8.5, "Aaa/AAA", 0.0040), (6.5, "Aa2/AA", 0.0055), (5.5, "A1/A+", 0.0070),
+    (4.25, "A2/A", 0.0078), (3.0, "A3/A-", 0.0089), (2.5, "Baa2/BBB", 0.0111),
+    (2.25, "Ba1/BB+", 0.0138), (2.0, "Ba2/BB", 0.0184), (1.75, "B1/B+", 0.0275),
+    (1.5, "B2/B", 0.0321), (1.25, "B3/B-", 0.0509), (0.8, "Caa/CCC", 0.0885),
+    (0.65, "Ca2/CC", 0.1261), (0.2, "C2/C", 0.1600), (float("-inf"), "D2/D", 0.1900),
+]
+
+
+def note_synthetique(couverture: float | None) -> tuple[str, float]:
+    """Renvoie (note, spread) selon la table de Damodaran. Sans donnée : BBB par défaut."""
+    if couverture is None or pd.isna(couverture):
+        return "Baa2/BBB", 0.0111
+    for seuil, note, spread in TABLE_NOTES:
+        if couverture > seuil:
+            return note, spread
+    return TABLE_NOTES[-1][1], TABLE_NOTES[-1][2]
+
+
 # Paramètres de marché par défaut (modifiables dans l'appli)
 MARCHE_DEFAUT = {
     "taux_sans_risque": 0.0483,   # TEC 10 France
@@ -73,6 +94,7 @@ def historique(ticker: str) -> pd.DataFrame:
         "Stocks": _ligne(bilan, "Inventory"),
         "Dettes fournisseurs": _ligne(bilan, "Accounts Payable", "Payables"),
         "Impôts": _ligne(cr, "Tax Provision"),
+        "Charges d'intérêts": _ligne(cr, "Interest Expense", "Interest Expense Non Operating"),
         "Résultat avant impôt": _ligne(cr, "Pretax Income"),
         "Dette financière": _ligne(bilan, "Total Debt"),
         "Trésorerie": _ligne(bilan, "Cash Cash Equivalents And Short Term Investments",
@@ -89,8 +111,9 @@ def historique(ticker: str) -> pd.DataFrame:
     df = df.dropna(axis=1, how="all") / 1e6          # en millions
 
     # Conventions de signe : Capex en positif
-    if "Capex" in df.index:
-        df.loc["Capex"] = df.loc["Capex"].abs()
+    for poste in ("Capex", "Charges d'intérêts"):
+        if poste in df.index:
+            df.loc[poste] = df.loc[poste].abs()
 
     # BFR d'exploitation = créances + stocks − fournisseurs
     bfr = 0
@@ -128,8 +151,11 @@ def donnees_marche(ticker: str) -> dict:
     info = t.info
     cours = fi["lastPrice"]
     nb_actions = (info.get("sharesOutstanding") or fi["shares"]) / 1e6
+    site = (info.get("website") or "").replace("https://", "").replace("http://", "").strip("/")
     return {
         "nom": info.get("longName", ticker),
+        "beta_yahoo": info.get("beta"),
+        "logo": f"https://www.google.com/s2/favicons?domain={site}&sz=128" if site else None,
         "devise": info.get("financialCurrency") or fi["currency"],
         "cours": cours,
         "nb_actions": nb_actions,
@@ -182,6 +208,9 @@ def preparer(ticker: str, marche: dict | None = None) -> dict:
     derniere = h.columns[-1]
 
     taux_is = float(r.loc["Taux d'impôt", "Moyenne"])
+    interets = h.loc["Charges d'intérêts", derniere] if "Charges d'intérêts" in h.index else None
+    couverture = h.loc["EBIT", derniere] / interets if interets else None
+    note, spread = note_synthetique(couverture)
     hyp = Hypotheses(
         croissance_ca=float(r.loc["Croissance CA", "Moyenne"]),
         marge_ebit=float(r.loc["Marge EBIT", "Moyenne"]),
@@ -206,12 +235,13 @@ def preparer(ticker: str, marche: dict | None = None) -> dict:
         taux_sans_risque=marche["taux_sans_risque"],
         beta=b,
         prime_risque=marche["prime_risque"],
-        kd=marche["taux_sans_risque"] + marche["spread"],
+        kd=marche["taux_sans_risque"] + spread,
         taux_is=taux_is,
         capitalisation=m["capitalisation"],
         dette=max(entreprise.dette_nette, 0.0),
     )
     return {"historique": h, "ratios": r, "marche": m, "beta": b,
+            "couverture": couverture, "note": note, "spread": spread,
             "hypotheses": hyp, "entreprise": entreprise, "parametres_wacc": params}
 
 
@@ -232,7 +262,11 @@ if __name__ == "__main__":
     print(d["historique"])
     pd.options.display.float_format = "{:.1%}".format
     print("\nRatios :\n", d["ratios"])
-    print(f"\nCours {m['cours']:.2f}  ·  {m['nb_actions']:.1f} M actions  ·  bêta {d['beta']:.2f}")
+    print(f"\nCours {m['cours']:.2f}  ·  {m['nb_actions']:.1f} M actions  ·  bêta {d['beta']:.2f}"
+          f" (Yahoo, vs S&P 500 : {m['beta_yahoo']})")
+    cv = d["couverture"]
+    print(f"Couverture des intérêts {cv:.1f}x → note synthétique {d['note']} → spread {d['spread']:.2%}"
+          if cv else f"Charges d'intérêts indisponibles → note par défaut {d['note']}")
 
     w = wacc(d["parametres_wacc"])
     res = valoriser(d["hypotheses"], d["entreprise"], w)
