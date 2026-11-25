@@ -29,6 +29,9 @@ class Hypotheses:
     taux_is: float            # taux d'impôt
     g: float                  # croissance à l'infini
     horizon: int = 5          # nombre d'années projetées
+    loyers_ca: float = 0.0    # IFRS 16 : renouvellement des contrats de location / CA
+    roic_terminal: float | None = None   # None = Gordon classique ; sinon formule ROIC
+    mi_annee: bool = False    # convention de milieu d'année pour l'actualisation
 
 
 @dataclass
@@ -37,7 +40,7 @@ class DonneesEntreprise:
     ca_dernier: float         # CA de la dernière année publiée
     bfr_dernier: float        # BFR de la dernière année publiée
     annee_derniere: int       # ex. 2025
-    dette_nette: float
+    dette_nette: float        # dettes locatives IFRS 16 comprises si Yahoo les inclut
     minoritaires: float
     provisions_retraites: float
     nb_actions: float         # en millions
@@ -96,7 +99,8 @@ def projeter_fcff(h: Hypotheses, d: DonneesEntreprise) -> pd.DataFrame:
         capex = ca * h.capex_ca
         bfr = ca * h.bfr_ca
         delta_bfr = bfr - bfr_prec
-        fcff = nopat + da - capex - delta_bfr
+        loyers = ca * h.loyers_ca
+        fcff = nopat + da - capex - delta_bfr - loyers
 
         lignes.append({
             "n": n,
@@ -108,6 +112,7 @@ def projeter_fcff(h: Hypotheses, d: DonneesEntreprise) -> pd.DataFrame:
             "Capex": capex,
             "BFR": bfr,
             "ΔBFR": delta_bfr,
+            "Loyers IFRS 16": loyers,
             "FCFF": fcff,
         })
         ca_prec, bfr_prec = ca, bfr
@@ -126,21 +131,55 @@ def valeur_terminale(fcff_final: float, wacc_: float, g: float) -> float:
     return fcff_final * (1 + g) / (wacc_ - g)
 
 
-def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float) -> dict:
+def valeur_terminale_roic(nopat_final: float, wacc_: float, g: float, roic: float) -> float:
+    """Formule des « value drivers » (McKinsey) :
+    VT = NOPAT_N × (1 + g) × (1 − g / ROIC) / (WACC − g).
+    Pour croître de g, l'entreprise doit réinvestir g / ROIC de son NOPAT :
+    la croissance n'est plus « gratuite »."""
+    if g >= wacc_:
+        raise ValueError(f"g ({g:.2%}) doit être inférieur au WACC ({wacc_:.2%})")
+    if roic <= 0:
+        raise ValueError("Le ROIC terminal doit être positif.")
+    return nopat_final * (1 + g) * (1 - g / roic) / (wacc_ - g)
+
+
+def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float,
+              decalage: float = 0.0, dividendes_par_action: float = 0.0) -> dict:
     """
     Calcule toute la chaîne : FCFF actualisés, VT, VE, fonds propres,
     valeur par action et potentiel. Renvoie un dictionnaire de résultats.
+
+    decalage : années écoulées depuis la clôture (ex. 0.9 en novembre pour une clôture
+               au 31/12). La VE est capitalisée au WACC jusqu'à aujourd'hui, et les
+               dividendes versés depuis la clôture sont retirés (ils ont quitté l'entreprise).
     """
     proj = projeter_fcff(h, d)
-    proj["Facteur d'actualisation"] = 1 / (1 + wacc_) ** proj["n"]
+    periode = proj["n"] - 0.5 if h.mi_annee else proj["n"]
+    proj["Facteur d'actualisation"] = 1 / (1 + wacc_) ** periode
     proj["FCFF actualisé"] = proj["FCFF"] * proj["Facteur d'actualisation"]
-
     somme_fcff_actu = proj["FCFF actualisé"].sum()
-    vt = valeur_terminale(proj["FCFF"].iloc[-1], wacc_, h.g)
-    vt_actu = vt / (1 + wacc_) ** h.horizon
 
-    ve = somme_fcff_actu + vt_actu
-    fonds_propres = ve - d.dette_nette - d.minoritaires - d.provisions_retraites
+    dernier = proj.iloc[-1]
+    if h.roic_terminal is None:
+        vt = valeur_terminale(dernier["FCFF"], wacc_, h.g)
+    else:
+        vt = valeur_terminale_roic(dernier["NOPAT"], wacc_, h.g, h.roic_terminal)
+    vt_actu = vt / (1 + wacc_) ** (h.horizon - 0.5 if h.mi_annee else h.horizon)
+
+    # ROIC implicite de la VT : g / taux de réinvestissement de la dernière année
+    reinvesti = dernier["Capex"] - dernier["D&A"] + dernier["ΔBFR"] + dernier["Loyers IFRS 16"]
+    taux_reinvestissement = reinvesti / dernier["NOPAT"]
+    if h.roic_terminal is not None:
+        roic_implicite = h.roic_terminal
+    elif taux_reinvestissement > 0:
+        roic_implicite = h.g / taux_reinvestissement
+    else:
+        roic_implicite = float("inf")   # croissance sans aucun réinvestissement
+
+    ve_cloture = somme_fcff_actu + vt_actu
+    ve = ve_cloture * (1 + wacc_) ** decalage
+    passif = d.dette_nette + d.minoritaires + d.provisions_retraites
+    fonds_propres = ve - passif - dividendes_par_action * d.nb_actions
     valeur_action = fonds_propres / d.nb_actions
 
     return {
@@ -149,11 +188,15 @@ def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float) -> dict:
         "somme_fcff_actu": somme_fcff_actu,
         "vt": vt,
         "vt_actu": vt_actu,
+        "ve_cloture": ve_cloture,
         "ve": ve,
-        "part_vt": vt_actu / ve,
+        "part_vt": vt_actu / ve_cloture,
         "fonds_propres": fonds_propres,
         "valeur_action": valeur_action,
+        "valeur_action_cloture": (ve_cloture - passif) / d.nb_actions,
         "potentiel": valeur_action / d.cours - 1,
+        "taux_reinvestissement": taux_reinvestissement,
+        "roic_implicite": roic_implicite,
     }
 
 
@@ -162,12 +205,13 @@ def valoriser(h: Hypotheses, d: DonneesEntreprise, wacc_: float) -> dict:
 # ---------------------------------------------------------------------------
 
 def sensibilite_wacc_g(h: Hypotheses, d: DonneesEntreprise,
-                       waccs: list[float], gs: list[float]) -> pd.DataFrame:
-    """Tableau de la valeur par action : WACC en lignes, g en colonnes."""
+                       waccs: list[float], gs: list[float], **options) -> pd.DataFrame:
+    """Tableau de la valeur par action : WACC en lignes, g en colonnes.
+    options : decalage, dividendes_par_action (transmis à valoriser)."""
     tableau = {}
     for g in gs:
         h_g = Hypotheses(**{**h.__dict__, "g": g})
-        tableau[g] = [valoriser(h_g, d, w)["valeur_action"] for w in waccs]
+        tableau[g] = [valoriser(h_g, d, w, **options)["valeur_action"] for w in waccs]
     return pd.DataFrame(tableau, index=waccs)
 
 
@@ -177,7 +221,7 @@ def sensibilite_wacc_g(h: Hypotheses, d: DonneesEntreprise,
 
 if __name__ == "__main__":
     hyp = Hypotheses(
-        croissance_ca=0.115, marge_ebit=0.105, da_ca=0.04, capex_ca=0.0425,
+        croissance_ca=0.0125, marge_ebit=0.115, da_ca=0.04, capex_ca=0.0425,
         bfr_ca=0.021, taux_is=0.26, g=0.02, horizon=5,
     )
     sg = DonneesEntreprise(
@@ -186,7 +230,7 @@ if __name__ == "__main__":
         nb_actions=489.9, cours=73.20,
     )
     params = ParametresWACC(
-        taux_sans_risque=0.0483, beta=1.328, prime_risque=0.0501,
+        taux_sans_risque=0.0483, beta=1.428, prime_risque=0.0501,
         kd=0.0483 + 0.0111, taux_is=0.26,
         capitalisation=489.9 * 73.20, dette=10356,
     )

@@ -1,292 +1,333 @@
 """
-data.py — Récupération automatique des données d'une entreprise (yfinance)
+app.py — Interface Streamlit du DCF automatisé
 
-Pour n'importe quel ticker Yahoo Finance (SGO.PA, AI.PA, ML.PA, AAPL, ...) :
-  1. télécharge les comptes annuels (compte de résultat, bilan, flux de trésorerie)
-  2. calcule les ratios historiques (comme l'onglet « Données historique »)
-  3. propose des hypothèses par défaut (moyennes historiques)
-  4. calcule le bêta contre un indice de référence
-  5. prépare les objets attendus par dcf.py
-
-Montants convertis en millions, dans la devise de publication de l'entreprise.
-Lancer un test :  python src/data.py SGO.PA
+Lancer :  streamlit run src/app.py
 """
 
-import sys
-
+import altair as alt
 import pandas as pd
-import yfinance as yf
+import streamlit as st
 
-from dcf import DonneesEntreprise, Hypotheses, ParametresWACC, valoriser, wacc
+from datetime import date
 
-# Indice de référence pour le bêta, selon le suffixe du ticker
-INDICES = {".PA": "^FCHI", ".DE": "^GDAXI", ".AS": "^AEX", ".MI": "FTSEMIB.MI",
-           ".L": "^FTSE", ".MC": "^IBEX", "": "^GSPC"}
+from data import SPREADS, beta_blume, note_synthetique, parametres_pays
+from dcf import (DonneesEntreprise, Hypotheses, ParametresWACC,
+                 sensibilite_wacc_g, valoriser, wacc)
 
-# Note synthétique de Damodaran (janvier 2026), grandes entreprises non financières :
-# couverture des intérêts (EBIT / charges d'intérêts) → note → spread de crédit
-TABLE_NOTES = [  # (couverture minimale, note, spread)
-    (8.5, "Aaa/AAA", 0.0040), (6.5, "Aa2/AA", 0.0055), (5.5, "A1/A+", 0.0070),
-    (4.25, "A2/A", 0.0078), (3.0, "A3/A-", 0.0089), (2.5, "Baa2/BBB", 0.0111),
-    (2.25, "Ba1/BB+", 0.0138), (2.0, "Ba2/BB", 0.0184), (1.75, "B1/B+", 0.0275),
-    (1.5, "B2/B", 0.0321), (1.25, "B3/B-", 0.0509), (0.8, "Caa/CCC", 0.0885),
-    (0.65, "Ca2/CC", 0.1261), (0.2, "C2/C", 0.1600), (float("-inf"), "D2/D", 0.1900),
-]
+st.set_page_config(page_title="DCF automatisé", page_icon="📈", layout="wide")
 
 
-def note_synthetique(couverture: float | None) -> tuple[str, float]:
-    """Renvoie (note, spread) selon la table de Damodaran. Sans donnée : BBB par défaut."""
-    if couverture is None or pd.isna(couverture):
-        return "Baa2/BBB", 0.0111
-    for seuil, note, spread in TABLE_NOTES:
-        if couverture > seuil:
-            return note, spread
-    return TABLE_NOTES[-1][1], TABLE_NOTES[-1][2]
+# ---------------------------------------------------------------------------
+# Données de référence : Saint-Gobain d'après le rapport annuel (modèle Excel)
+# ---------------------------------------------------------------------------
 
-
-# Paramètres de marché par défaut (modifiables dans l'appli)
-MARCHE_DEFAUT = {
-    "taux_sans_risque": 0.0483,   # TEC 10 France
-    "prime_risque": 0.0501,       # Damodaran, France
-    "spread": 0.0111,             # Damodaran, BBB
+EXEMPLE_SG = {
+    "nom": "Saint-Gobain (rapport annuel 2025)", "devise": "EUR", "beta": 1.428, "beta_yahoo": None,
+    "logo": "https://www.google.com/s2/favicons?domain=saint-gobain.com&sz=128",
+    "couverture": 5293 / 388, "note": "Baa2/BBB", "spread": 0.0111, "petite": False,
+    "pays": parametres_pays("France"), "taux_is_source": "modèle Excel", "dettes_locatives": None,
+    "date_cloture": pd.Timestamp("2025-12-31"),
+    "decalage": max((date.today() - date(2025, 12, 31)).days / 365.25, 0.0),
+    "dividendes": 0.0, "alertes": [], "devise_comptes": "EUR",
+    "hypotheses": Hypotheses(croissance_ca=0.0125, marge_ebit=0.115, da_ca=0.04, capex_ca=0.0425,
+                             bfr_ca=0.021, taux_is=0.26, g=0.02, horizon=5),
+    "entreprise": DonneesEntreprise(ca_dernier=46483, bfr_dernier=968, annee_derniere=2025,
+                                    dette_nette=10356, minoritaires=568, provisions_retraites=1444,
+                                    nb_actions=489.9, cours=73.20),
+    "historique": None, "ratios": None,
 }
 
 
-# ---------------------------------------------------------------------------
-# Outils
-# ---------------------------------------------------------------------------
-
-def _ligne(tableau: pd.DataFrame, *noms: str) -> pd.Series | None:
-    """Renvoie la première ligne trouvée parmi plusieurs noms possibles.
-    (Yahoo n'utilise pas toujours le même libellé selon les entreprises.)"""
-    for nom in noms:
-        if nom in tableau.index:
-            return tableau.loc[nom]
-    return None
-
-
-def _derniere_valeur(serie: pd.Series) -> float:
-    """Dernière valeur disponible d'une ligne (Yahoo laisse parfois la dernière année vide)."""
-    serie = serie.dropna()
-    if serie.empty:
-        raise ValueError("Dette nette introuvable sur Yahoo Finance : à saisir à la main.")
-    return float(serie.iloc[-1])
-
-
-def _indice_pour(ticker: str) -> str:
-    for suffixe, indice in INDICES.items():
-        if suffixe and ticker.upper().endswith(suffixe):
-            return indice
-    return INDICES[""]
-
-
-# ---------------------------------------------------------------------------
-# 1. Données historiques
-# ---------------------------------------------------------------------------
-
-def historique(ticker: str) -> pd.DataFrame:
-    """Tableau historique (une colonne par année, de la plus ancienne à la plus récente),
-    en millions."""
-    t = yf.Ticker(ticker)
-    cr, bilan, flux = t.income_stmt, t.balance_sheet, t.cashflow
-    if cr is None or cr.empty:
-        raise ValueError(f"Aucune donnée financière trouvée pour « {ticker} ».")
-
-    lignes = {
-        "CA": _ligne(cr, "Total Revenue", "Operating Revenue"),
-        "EBIT": _ligne(cr, "EBIT", "Operating Income"),
-        "D&A": _ligne(flux, "Depreciation And Amortization", "Depreciation Amortization Depletion",
-                      "Reconciled Depreciation"),
-        "Capex": _ligne(flux, "Capital Expenditure"),
-        "Créances clients": _ligne(bilan, "Accounts Receivable", "Receivables"),
-        "Stocks": _ligne(bilan, "Inventory"),
-        "Dettes fournisseurs": _ligne(bilan, "Accounts Payable", "Payables"),
-        "Impôts": _ligne(cr, "Tax Provision"),
-        "Charges d'intérêts": _ligne(cr, "Interest Expense", "Interest Expense Non Operating"),
-        "Résultat avant impôt": _ligne(cr, "Pretax Income"),
-        "Dette financière": _ligne(bilan, "Total Debt"),
-        "Dette nette Yahoo": _ligne(bilan, "Net Debt"),
-        "Trésorerie": _ligne(bilan, "Cash Cash Equivalents And Short Term Investments",
-                             "Cash And Cash Equivalents"),
-        "Minoritaires": _ligne(bilan, "Minority Interest"),
-    }
-    manquantes = [k for k in ("CA", "EBIT", "D&A", "Capex") if lignes[k] is None]
-    if manquantes:
-        raise ValueError(f"Données indispensables absentes pour « {ticker} » : {', '.join(manquantes)}. "
-                         "Le DCF FCFF n'est probablement pas adapté à cette entreprise.")
-    df = pd.DataFrame({k: v for k, v in lignes.items() if v is not None}).T
-    df = df[sorted(df.columns)]                      # années croissantes
-    df.columns = [c.year for c in df.columns]
-    df = df.dropna(axis=1, how="all") / 1e6          # en millions
-
-    # Conventions de signe : Capex en positif
-    for poste in ("Capex", "Charges d'intérêts"):
-        if poste in df.index:
-            df.loc[poste] = df.loc[poste].abs()
-
-    # BFR d'exploitation = créances + stocks − fournisseurs
-    bfr = 0
-    for poste, signe in (("Créances clients", 1), ("Stocks", 1), ("Dettes fournisseurs", -1)):
-        if poste in df.index:
-            bfr = bfr + signe * df.loc[poste].fillna(0)
-    df.loc["BFR"] = bfr
-
-    # Dette nette = dette financière − trésorerie. Si une des deux manque pour une année,
-    # on ne remplace PAS par 0 (sinon dette nette = −trésorerie, donc faussement négative) :
-    # on prend la « Net Debt » de Yahoo, sinon on laisse vide.
-    nan = pd.Series(float("nan"), index=df.columns)
-    dette = df.loc["Dette financière"] if "Dette financière" in df.index else nan
-    treso = df.loc["Trésorerie"] if "Trésorerie" in df.index else nan
-    yahoo = df.loc["Dette nette Yahoo"] if "Dette nette Yahoo" in df.index else nan
-    df.loc["Dette nette"] = (dette - treso).fillna(yahoo)
-    return df
-
-
-def ratios(h: pd.DataFrame) -> pd.DataFrame:
-    """Ratios historiques et leur moyenne (comme les colonnes I à M de ton Excel)."""
-    r = pd.DataFrame({
-        "Croissance CA": h.loc["CA"].pct_change(),
-        "Marge EBIT": h.loc["EBIT"] / h.loc["CA"],
-        "D&A/CA": h.loc["D&A"] / h.loc["CA"],
-        "Capex/CA": h.loc["Capex"] / h.loc["CA"],
-        "BFR/CA": h.loc["BFR"] / h.loc["CA"],
-        "Taux d'impôt": h.loc["Impôts"] / h.loc["Résultat avant impôt"],
-    }).T
-    r["Moyenne"] = r.mean(axis=1)
-    return r
-
-
-# ---------------------------------------------------------------------------
-# 2. Marché : cours, actions, bêta
-# ---------------------------------------------------------------------------
-
-def donnees_marche(ticker: str) -> dict:
-    t = yf.Ticker(ticker)
-    fi = t.fast_info
-    info = t.info
-    cours = fi["lastPrice"]
-    nb_actions = (info.get("sharesOutstanding") or fi["shares"]) / 1e6
-    site = (info.get("website") or "").replace("https://", "").replace("http://", "").strip("/")
-    return {
-        "nom": info.get("longName", ticker),
-        "beta_yahoo": info.get("beta"),
-        "logo": f"https://www.google.com/s2/favicons?domain={site}&sz=128" if site else None,
-        "devise": info.get("financialCurrency") or fi["currency"],
-        "cours": cours,
-        "nb_actions": nb_actions,
-        "capitalisation": cours * nb_actions,
-        "plus_bas_52s": fi["yearLow"],
-        "plus_haut_52s": fi["yearHigh"],
-    }
-
-
-def beta(ticker: str, indice: str | None = None, annees: int = 5) -> float:
-    """Bêta = Cov(rendements action, rendements indice) / Var(rendements indice),
-    sur des cours mensuels ajustés (comme ton onglet « Calcul Béta »)."""
-    indice = indice or _indice_pour(ticker)
-    prix = yf.download([ticker, indice], period=f"{annees}y", interval="1mo",
-                       auto_adjust=True, progress=False)["Close"].dropna()
-    rdt = prix.pct_change().dropna()
-    return rdt[ticker].cov(rdt[indice]) / rdt[indice].var()
-
-
-# ---------------------------------------------------------------------------
-# 3. Assemblage : tout ce qu'il faut pour dcf.py
-# ---------------------------------------------------------------------------
-
-SECTEURS_EXCLUS = ("bank", "banks", "insurance", "capital markets", "credit services",
-                    "asset management", "financial conglomerates")
-
-
-def verifier_eligibilite(ticker: str) -> None:
-    """Le DCF FCFF n'a pas de sens pour les banques et assurances :
-    leur dette est leur matière première, il n'y a ni EBIT, ni BFR, ni Capex au sens industriel."""
-    info = yf.Ticker(ticker).info
-    secteur = (info.get("industry") or "").lower()
-    if any(mot in secteur for mot in SECTEURS_EXCLUS):
-        raise ValueError(
-            f"{info.get('longName', ticker)} est une entreprise financière ({info.get('industry')}). "
-            "Le DCF FCFF n'est pas adapté : utiliser plutôt un multiple de fonds propres "
-            "(cours / valeur comptable) ou un modèle de dividendes."
-        )
-
-
-def preparer(ticker: str, marche: dict | None = None) -> dict:
-    """Récupère tout et renvoie les trois objets de dcf.py, avec des hypothèses
-    par défaut = moyennes historiques. L'appli permettra ensuite de les modifier."""
-    marche = {**MARCHE_DEFAUT, **(marche or {})}
-    verifier_eligibilite(ticker)
-    h = historique(ticker)
-    r = ratios(h)
-    m = donnees_marche(ticker)
-    b = beta(ticker)
-    derniere = h.columns[-1]
-
-    taux_is = float(r.loc["Taux d'impôt", "Moyenne"])
-    interets = h.loc["Charges d'intérêts", derniere] if "Charges d'intérêts" in h.index else None
-    couverture = h.loc["EBIT", derniere] / interets if interets else None
-    note, spread = note_synthetique(couverture)
-    hyp = Hypotheses(
-        croissance_ca=float(r.loc["Croissance CA", "Moyenne"]),
-        marge_ebit=float(r.loc["Marge EBIT", "Moyenne"]),
-        da_ca=float(r.loc["D&A/CA", "Moyenne"]),
-        capex_ca=float(r.loc["Capex/CA", "Moyenne"]),
-        bfr_ca=float(r.loc["BFR/CA", "Moyenne"]),
-        taux_is=taux_is,
-        g=0.02,
-        horizon=5,
-    )
-    entreprise = DonneesEntreprise(
-        ca_dernier=float(h.loc["CA", derniere]),
-        bfr_dernier=float(h.loc["BFR", derniere]),
-        annee_derniere=int(derniere),
-        dette_nette=_derniere_valeur(h.loc["Dette nette"]),
-        minoritaires=float(h.loc["Minoritaires", derniere]) if "Minoritaires" in h.index else 0.0,
-        provisions_retraites=0.0,   # pas disponible sur Yahoo : à saisir dans l'appli
-        nb_actions=m["nb_actions"],
-        cours=m["cours"],
-    )
-    params = ParametresWACC(
-        taux_sans_risque=marche["taux_sans_risque"],
-        beta=b,
-        prime_risque=marche["prime_risque"],
-        kd=marche["taux_sans_risque"] + spread,
-        taux_is=taux_is,
-        capitalisation=m["capitalisation"],
-        dette=max(entreprise.dette_nette, 0.0),
-    )
-    return {"historique": h, "ratios": r, "marche": m, "beta": b,
-            "couverture": couverture, "note": note, "spread": spread,
-            "hypotheses": hyp, "entreprise": entreprise, "parametres_wacc": params}
-
-
-# ---------------------------------------------------------------------------
-# Test : python src/data.py SGO.PA
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    ticker = sys.argv[1] if len(sys.argv) > 1 else "SGO.PA"
-    try:
-        d = preparer(ticker)
-    except ValueError as e:
-        print(f"\n⚠ {e}\n")
-        sys.exit(1)
+@st.cache_data(ttl=3600, show_spinner="Récupération des données Yahoo Finance…")
+def charger(ticker: str) -> dict:
+    from data import preparer
+    d = preparer(ticker)
     m = d["marche"]
-    pd.options.display.float_format = "{:,.1f}".format
-    print(f"\n{m['nom']} ({ticker}) — montants en millions de {m['devise']}\n")
-    print(d["historique"])
-    pd.options.display.float_format = "{:.1%}".format
-    print("\nRatios :\n", d["ratios"])
-    print(f"\nCours {m['cours']:.2f}  ·  {m['nb_actions']:.1f} M actions  ·  bêta {d['beta']:.2f}"
-          f" (Yahoo, vs S&P 500 : {m['beta_yahoo']})")
-    cv = d["couverture"]
-    print(f"Couverture des intérêts {cv:.1f}x → note synthétique {d['note']} → spread {d['spread']:.2%}"
-          if cv else f"Charges d'intérêts indisponibles → note par défaut {d['note']}")
+    return {"nom": m["nom"], "devise": m["devise"], "devise_comptes": m["devise_comptes"],
+            "beta": d["beta"], "beta_yahoo": m["beta_yahoo"], "logo": m["logo"],
+            "couverture": d["couverture"], "note": d["note"], "spread": d["spread"], "petite": d["petite"],
+            "pays": d["pays"], "taux_is_source": d["taux_is_source"], "dettes_locatives": d["dettes_locatives"],
+            "date_cloture": d["date_cloture"], "decalage": d["decalage"], "dividendes": d["dividendes"],
+            "alertes": d["alertes"],
+            "hypotheses": d["hypotheses"], "entreprise": d["entreprise"],
+            "historique": d["historique"], "ratios": d["ratios"]}
 
-    w = wacc(d["parametres_wacc"])
-    res = valoriser(d["hypotheses"], d["entreprise"], w)
-    print(f"\nWACC {w:.2%}  ·  VE {res['ve']:,.0f}  ·  part VT {res['part_vt']:.0%}")
-    print(f"Valeur par action : {res['valeur_action']:.2f}  (cours {m['cours']:.2f}, "
-          f"potentiel {res['potentiel']:.1%})")
-    print("\n⚠ Hypothèses par défaut = moyennes historiques, provisions retraites = 0. "
-          "À ajuster avant de conclure.")
+
+def pct(x: float, dec: int = 1) -> str:
+    return f"{x * 100:.{dec}f} %".replace(".", ",")
+
+
+def nombre(x: float, dec: int = 0) -> str:
+    return f"{x:,.{dec}f}".replace(",", " ").replace(".", ",")
+
+
+# ---------------------------------------------------------------------------
+# Barre latérale : choix de l'entreprise et paramètres de marché
+# ---------------------------------------------------------------------------
+
+st.sidebar.title("📈 DCF automatisé")
+source = st.sidebar.radio("Source des données",
+                          ["Ticker Yahoo Finance", "Exemple : Saint-Gobain (rapport annuel)"])
+
+if source == "Ticker Yahoo Finance":
+    ticker = st.sidebar.text_input("Ticker", value="SGO.PA",
+                                   help="Exemples : SGO.PA, ML.PA, ORA.PA, AAPL").strip().upper()
+    try:
+        donnees = charger(ticker)
+    except ValueError as e:
+        st.warning(f"⚠ {e}")
+        st.stop()
+    except Exception as e:  # réseau, ticker inconnu…
+        st.error(f"Impossible de récupérer les données pour « {ticker} » : {e}")
+        st.stop()
+else:
+    ticker = "SGO-exemple"
+    donnees = EXEMPLE_SG
+
+h0, e0 = donnees["hypotheses"], donnees["entreprise"]
+cle = ticker  # pour remettre les curseurs à zéro quand on change d'entreprise
+
+if st.sidebar.button("↺ Réinitialiser les valeurs", width="stretch",
+                     help="Revenir aux valeurs par défaut pour cette entreprise"):
+    for k in [k for k in st.session_state if str(k).endswith(f"_{cle}")]:
+        del st.session_state[k]
+    st.rerun()
+
+st.sidebar.subheader("Coût du capital")
+pays = donnees["pays"]
+st.sidebar.caption(f"Pays : {pays['pays']}" + ("" if pays["connu"] else " (absent de la table : paramètres France)"))
+rf = st.sidebar.number_input("Taux sans risque (%)", value=round(pays["rf"] * 100, 2), step=0.05,
+                             key=f"rf_{cle}",
+                             help="Taux d'État à 10 ans du pays (novembre 2026). France : TEC 10 · "
+                                  "Allemagne : Bund · États-Unis : T-Note.") / 100
+prime = st.sidebar.number_input("Prime de risque du marché (%)", value=round(pays["prime"] * 100, 2),
+                                step=0.05, key=f"erp_{cle}",
+                                help="Prime de risque totale du pays, Damodaran (janvier 2026)") / 100
+notes = list(SPREADS)
+note = st.sidebar.selectbox("Note de crédit", notes, index=notes.index(donnees["note"]), key=f"note_{cle}",
+                            help="Par défaut : note synthétique de Damodaran, déduite de la couverture "
+                                 "des intérêts (EBIT / charges d'intérêts). Remplace-la par la vraie note "
+                                 "S&P ou Moody's si tu la connais.")
+spread = SPREADS[note]
+cv = donnees["couverture"]
+table = "petites entreprises" if donnees.get("petite") else "grandes entreprises"
+st.sidebar.caption((f"Couverture des intérêts : {cv:.1f}x → note synthétique "
+                    f"{note_synthetique(cv, donnees.get('petite', False))[0]} (table {table}). "
+                    if cv else "Charges d'intérêts indisponibles : BBB par défaut. ")
+                   + f"Spread retenu : {pct(spread, 2)}")
+type_beta = st.sidebar.radio("Bêta", ["Brut", "Ajusté (Blume)"], horizontal=True, key=f"tb_{cle}",
+                             help="Blume : 0,67 × bêta brut + 0,33. Les bêtas tendent vers 1 avec le temps.")
+beta_defaut = donnees["beta"] if type_beta == "Brut" else beta_blume(donnees["beta"])
+beta = st.sidebar.number_input("Valeur du bêta", value=round(float(beta_defaut), 3), step=0.05,
+                               format="%.3f", key=f"beta_{type_beta}_{cle}",
+                               help="Calculé sur 5 ans en mensuel contre l'indice du pays")
+if donnees.get("beta_yahoo"):
+    st.sidebar.caption(f"Bêta affiché par Yahoo : {donnees['beta_yahoo']:.2f} "
+                       "(calculé contre le S&P 500, même pour une action européenne)")
+
+# ---------------------------------------------------------------------------
+# Hypothèses (pré-remplies, modifiables)
+# ---------------------------------------------------------------------------
+
+t_logo, t_nom = st.columns([1, 12], vertical_alignment="center")
+if donnees.get("logo"):
+    try:
+        t_logo.image(donnees["logo"], width=64)
+    except Exception:
+        pass
+t_nom.title(donnees["nom"])
+st.caption(f"Montants en millions de {donnees['devise']} · dernière clôture : "
+           f"{donnees['date_cloture']:%d/%m/%Y}")
+for alerte in donnees.get("alertes", []):
+    st.warning(alerte, icon="⚠️")
+
+croissance_defaut = min(max(h0.croissance_ca, 0.0), 0.05)   # bornée entre 0 % et 5 %
+
+with st.expander("Hypothèses opérationnelles", expanded=True):
+    c1, c2, c3, c4 = st.columns(4)
+    croissance = c1.slider("Croissance du CA (%/an)", -5.0, 10.0, round(croissance_defaut * 100, 2), 0.25,
+                           key=f"cr_{cle}") / 100
+    marge = c1.slider("Marge EBIT (%)", 0.0, 40.0, round(h0.marge_ebit * 100, 2), 0.25, key=f"mg_{cle}") / 100
+    da = c2.slider("D&A / CA (%)", 0.0, 20.0, round(h0.da_ca * 100, 2), 0.25, key=f"da_{cle}") / 100
+    capex = c2.slider("Capex / CA (%)", 0.0, 20.0, round(h0.capex_ca * 100, 2), 0.25, key=f"cx_{cle}") / 100
+    bfr = c3.slider("BFR / CA (%)", -20.0, 40.0, round(h0.bfr_ca * 100, 2), 0.5, key=f"bfr_{cle}") / 100
+    taux_is = c3.slider("Taux d'impôt (%)", 0.0, 40.0, round(h0.taux_is * 100, 1), 0.5, key=f"is_{cle}") / 100
+    g = c4.slider("Croissance à l'infini g (%)", 0.0, 4.0, round(h0.g * 100, 2), 0.25, key=f"g_{cle}") / 100
+    horizon = c4.slider("Horizon (années)", 3, 10, h0.horizon, key=f"hz_{cle}")
+    loyers = c4.slider("Loyers IFRS 16 / CA (%)", 0.0, 10.0, 0.0, 0.25, key=f"ly_{cle}",
+                       help="Renouvellement des contrats de location (≈ amortissement des droits "
+                            "d'utilisation, voir l'annexe du rapport annuel). À renseigner pour la "
+                            "distribution, l'hôtellerie, les compagnies aériennes…") / 100
+    if croissance_defaut != h0.croissance_ca:
+        st.caption(f"ℹ Croissance historique moyenne : {pct(h0.croissance_ca)}. "
+                   "Valeur par défaut bornée entre 0 % et 5 %.")
+    st.caption(f"Taux d'impôt par défaut : {donnees.get('taux_is_source', '')}.")
+
+with st.expander("Méthode", expanded=True):
+    c1, c2, c3 = st.columns(3)
+    methode_vt = c1.radio("Valeur terminale", ["Gordon sur le FCFF", "Formule ROIC (McKinsey)"],
+                          key=f"vt_{cle}",
+                          help="Gordon : VT = FCFF × (1 + g) / (WACC − g). La formule ROIC impose que la "
+                               "croissance soit financée : FCFF = NOPAT × (1 − g / ROIC).")
+    roic_t = None
+    if methode_vt == "Formule ROIC (McKinsey)":
+        roic_t = c1.slider("ROIC des nouveaux investissements (%)", 4.0, 40.0, 12.0, 0.5, key=f"roic_{cle}",
+                           help="À long terme, la concurrence ramène le ROIC vers le coût du capital. "
+                                "ROIC = WACC : la croissance ne crée plus de valeur.") / 100
+    mi_annee = c2.checkbox("Convention de milieu d'année", value=False, key=f"mid_{cle}",
+                           help="Les flux arrivent tout au long de l'année : on les actualise à mi-année "
+                                "(pratique courante en banque d'affaires).")
+    a_date = c3.checkbox("Valoriser à la date du jour", value=donnees["historique"] is not None,
+                         key=f"date_{cle}",
+                         help="Sans cette option, la valeur est calculée à la date de clôture : la "
+                              "comparer au cours du jour est incohérent. Avec, la VE est capitalisée au "
+                              "WACC jusqu'à aujourd'hui et les dividendes versés depuis sont retirés.")
+    dividendes = 0.0
+    if a_date:
+        dividendes = c3.number_input(f"Dividendes versés depuis le {donnees['date_cloture']:%d/%m/%Y} "
+                                     "(par action)", value=float(round(donnees["dividendes"], 2)),
+                                     step=0.1, key=f"div_{cle}")
+        if dividendes == 0:
+            c3.caption("ℹ Aucun dividende saisi : la valeur est surestimée si un dividende a été versé "
+                       "depuis la clôture.")
+
+with st.expander("Passage aux fonds propres (à vérifier dans le rapport annuel)"):
+    c1, c2, c3, c4 = st.columns(4)
+    dette_nette = c1.number_input("Dette nette", value=float(round(e0.dette_nette)), step=100.0, key=f"dn_{cle}")
+    if donnees.get("dettes_locatives"):
+        c1.caption(f"dont dettes locatives IFRS 16 : {nombre(donnees['dettes_locatives'])}")
+    minoritaires = c2.number_input("Intérêts minoritaires", value=float(round(e0.minoritaires)), step=10.0,
+                                   key=f"mi_{cle}")
+    provisions = c3.number_input("Provisions retraites", value=float(round(e0.provisions_retraites)), step=10.0,
+                                 key=f"pr_{cle}", help="Absentes de Yahoo Finance : à saisir à la main")
+    nb_actions = c4.number_input("Nombre d'actions (M)", value=float(round(e0.nb_actions, 1)), step=1.0,
+                                 key=f"na_{cle}")
+
+# ---------------------------------------------------------------------------
+# Calcul
+# ---------------------------------------------------------------------------
+
+hyp = Hypotheses(croissance_ca=croissance, marge_ebit=marge, da_ca=da, capex_ca=capex,
+                 bfr_ca=bfr, taux_is=taux_is, g=g, horizon=horizon, loyers_ca=loyers,
+                 roic_terminal=roic_t, mi_annee=mi_annee)
+options = {"decalage": donnees["decalage"] if a_date else 0.0, "dividendes_par_action": dividendes}
+ent = DonneesEntreprise(ca_dernier=e0.ca_dernier, bfr_dernier=e0.bfr_dernier,
+                        annee_derniere=e0.annee_derniere, dette_nette=dette_nette,
+                        minoritaires=minoritaires, provisions_retraites=provisions,
+                        nb_actions=nb_actions, cours=e0.cours)
+capitalisation = nb_actions * e0.cours
+w = wacc(ParametresWACC(taux_sans_risque=rf, beta=beta, prime_risque=prime, kd=rf + spread,
+                        taux_is=taux_is, capitalisation=capitalisation, dette=max(dette_nette, 0.0)))
+
+try:
+    res = valoriser(hyp, ent, w, **options)
+except ValueError as e:
+    st.error(f"⚠ {e}")
+    st.stop()
+
+proj = res["projection"]
+pot = res["potentiel"]
+reco = "ACHAT" if pot > 0.15 else "VENTE" if pot < -0.10 else "CONSERVER"
+
+# ---------------------------------------------------------------------------
+# Résultats
+# ---------------------------------------------------------------------------
+
+st.divider()
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Valeur par action", f"{nombre(res['valeur_action'], 2)} {donnees['devise']}")
+c2.metric("Cours actuel", f"{nombre(e0.cours, 2)} {donnees['devise']}")
+c3.metric("Potentiel", pct(pot), delta=pct(pot), delta_color="normal")
+c4.metric("WACC", pct(w, 2))
+c5.metric("Recommandation", reco)
+st.caption(f"Valeur au {donnees['date_cloture']:%d/%m/%Y} : "
+           f"{nombre(res['valeur_action_cloture'], 2)} {donnees['devise']}"
+           + (f" · ramenée à aujourd'hui ({nombre(options['decalage'], 2)} an après la clôture)"
+              if a_date else " · ⚠ valeur à la date de clôture, comparée au cours du jour"))
+
+if res["fonds_propres"] < 0:
+    st.error("La valeur des fonds propres est négative : la dette nette est probablement surestimée "
+             "(activité de financement consolidée, comme la banque de Renault ?). Corrige-la ci-dessus.")
+
+onglets = st.tabs(["Projection", "Sensibilité", "Contrôles", "Historique"])
+
+with onglets[0]:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Somme des FCFF actualisés", nombre(res["somme_fcff_actu"]))
+    c2.metric("VT actualisée", nombre(res["vt_actu"]))
+    c3.metric("Valeur d'entreprise", nombre(res["ve"]))
+    c4.metric("Fonds propres", nombre(res["fonds_propres"]))
+    tableau = proj.drop(columns=["n"]).T
+    tableau.columns = [str(c) for c in tableau.columns]
+    st.dataframe(tableau.style.format(lambda x: nombre(x, 3) if abs(x) < 2 else nombre(x)),
+                 width="stretch")
+    graph = (proj[["FCFF", "FCFF actualisé"]].reset_index()
+             .melt(id_vars="annee", var_name="Série", value_name="Montant"))
+    graph["annee"] = graph["annee"].astype(str)
+    base = alt.Chart(graph).encode(
+        x=alt.X("annee:N", title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("Montant:Q", title=f"M{donnees['devise']}", scale=alt.Scale(zero=False)),
+        color=alt.Color("Série:N", scale=alt.Scale(range=["#1F3864", "#9DB4D9"]),
+                        legend=alt.Legend(orient="top", title=None)),
+    )
+    courbes = base.mark_line(point=alt.OverlayMarkDef(size=70), strokeWidth=2.5)
+    etiquettes = base.mark_text(dy=-12, fontSize=11).encode(text=alt.Text("Montant:Q", format=",.0f"))
+    st.altair_chart((courbes + etiquettes).properties(height=320), width="stretch")
+    st.caption("L'axe ne part pas de zéro pour rendre visibles les écarts d'une année à l'autre. "
+               "L'écart entre les deux courbes montre l'effet de l'actualisation.")
+    st.caption("FCFF = NOPAT + D&A − Capex − ΔBFR − loyers IFRS 16 · "
+               + ("VT = FCFF final × (1 + g) / (WACC − g)" if roic_t is None
+                  else "VT = NOPAT final × (1 + g) × (1 − g / ROIC) / (WACC − g)"))
+
+with onglets[1]:
+    waccs = [round(w + d, 4) for d in (-0.01, -0.005, 0, 0.005, 0.01)]
+    gs = [round(g + d, 4) for d in (-0.005, -0.0025, 0, 0.0025, 0.005)]
+    gs = [x for x in gs if x < min(waccs)]
+    sens = sensibilite_wacc_g(hyp, ent, waccs, gs, **options)
+    sens.index = [f"WACC {pct(x, 2)}" for x in sens.index]
+    sens.columns = [f"g {pct(x, 2)}" for x in sens.columns]
+
+    def couleur(v):
+        return ("background-color:#C6EFCE;color:#006100" if v >= e0.cours
+                else "background-color:#FFC7CE;color:#9C0006")
+
+    st.markdown("**Valeur par action selon le WACC et g** (vert : au-dessus du cours)")
+    st.dataframe(sens.style.map(couleur).format(lambda x: nombre(x, 2)), width="stretch")
+
+with onglets[2]:
+    ebitda_1 = proj["EBIT"].iloc[0] + proj["D&A"].iloc[0]
+    ebitda_n = proj["EBIT"].iloc[-1] + proj["D&A"].iloc[-1]
+    controles = [
+        ("g < WACC", pct(w - g, 2), "> 0", w > g),
+        ("Part de la VT dans la VE", pct(res["part_vt"]), "60 % à 80 %", 0.6 <= res["part_vt"] <= 0.8),
+        ("VE / EBITDA année 1", f"{res['ve_cloture'] / ebitda_1:.1f}x", "5x à 15x", 5 <= res["ve_cloture"] / ebitda_1 <= 15),
+        ("Multiple de sortie VT / EBITDA final", f"{res['vt'] / ebitda_n:.1f}x", "5x à 15x",
+         5 <= res["vt"] / ebitda_n <= 15),
+        ("Capex ≥ D&A", pct(capex - da, 2), "≥ 0", capex >= da),
+        ("ROIC implicite de la VT", "infini" if res["roic_implicite"] == float("inf")
+         else pct(res["roic_implicite"]), "≤ 25 %", res["roic_implicite"] <= 0.25),
+        ("Fonds propres positifs", nombre(res["fonds_propres"]), "> 0", res["fonds_propres"] > 0),
+    ]
+    df_ctl = pd.DataFrame(controles, columns=["Contrôle", "Valeur", "Règle", "OK"])
+    df_ctl["Statut"] = df_ctl["OK"].map({True: "✅ OK", False: "⚠ À vérifier"})
+    st.dataframe(df_ctl.drop(columns="OK"), hide_index=True, width="stretch")
+    nb_ok = int(df_ctl["OK"].sum())
+    (st.success if nb_ok == len(df_ctl) else st.warning)(f"{nb_ok} / {len(df_ctl)} contrôles OK")
+
+with onglets[3]:
+    if donnees["historique"] is None:
+        st.info("Exemple construit à partir du rapport annuel : voir le fichier Excel du projet.")
+    else:
+        hist, rat = donnees["historique"].copy(), donnees["ratios"].copy()
+        hist.attrs, rat.attrs = {}, {}                   # métadonnées internes, non affichables
+        hist.columns = [str(c) for c in hist.columns]   # années + « Moyenne » : tout en texte
+        rat.columns = [str(c) for c in rat.columns]
+        st.markdown("**Données historiques (Yahoo Finance)**")
+        st.dataframe(hist.style.format(lambda x: nombre(x)), width="stretch")
+        st.markdown("**Ratios**")
+        st.dataframe(rat.style.format(lambda x: pct(x) if pd.notna(x) else "–"),
+                     width="stretch")
+        st.caption("Les définitions de Yahoo (EBIT, D&A, BFR) peuvent différer du rapport annuel.")
+
+st.divider()
+st.caption("Projet personnel à visée pédagogique — ne constitue pas un conseil en investissement.")

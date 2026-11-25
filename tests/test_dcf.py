@@ -101,3 +101,66 @@ def test_sensibilite_coherente(hyp, sg):
     assert (t.diff(axis=0).iloc[1:] < 0).all().all()
     assert (t.diff(axis=1).iloc[:, 1:] > 0).all().all()
     assert t.loc[0.098, 0.02] == pytest.approx(valoriser(hyp, sg, 0.098)["valeur_action"])
+
+
+# --- 3. Options de méthode (revue d'analyste) -------------------------------
+
+def test_options_par_defaut_inchangees(hyp, sg, params):
+    """Sans option, on retrouve exactement l'Excel."""
+    res = valoriser(hyp, sg, wacc(params), decalage=0.0, dividendes_par_action=0.0)
+    assert res["valeur_action"] == pytest.approx(67.93, abs=0.01)
+    assert res["valeur_action_cloture"] == pytest.approx(res["valeur_action"])
+
+
+def test_roic_implicite_saint_gobain(hyp, sg, params):
+    """VT classique : 2 % de croissance avec 3 % du NOPAT réinvesti → ROIC implicite ≈ 62 %."""
+    res = valoriser(hyp, sg, wacc(params))
+    assert res["roic_implicite"] == pytest.approx(0.617, abs=0.005)
+
+
+def test_vt_roic_formule(hyp, sg):
+    from dcf import valeur_terminale_roic
+    vt = valeur_terminale_roic(4000, wacc_=0.10, g=0.02, roic=0.12)
+    assert vt == pytest.approx(4000 * 1.02 * (1 - 0.02 / 0.12) / 0.08)
+
+
+def test_vt_roic_plus_prudente(hyp, sg, params):
+    """Avec un ROIC terminal réaliste (12 %), la valeur baisse (≈ 59 €)."""
+    w = wacc(params)
+    hyp.roic_terminal = 0.12
+    res = valoriser(hyp, sg, w)
+    assert res["valeur_action"] == pytest.approx(59.2, abs=0.1)
+
+
+def test_roic_egal_wacc_croissance_sans_valeur(hyp, sg):
+    """Si ROIC = WACC, la croissance ne crée pas de valeur : VT = NOPAT_N+1 / WACC,
+    quel que soit g."""
+    hyp.roic_terminal = 0.10
+    for g in (0.01, 0.03):
+        res = valoriser(Hypotheses(**{**hyp.__dict__, "g": g}), sg, 0.10)
+        nopat_suivant = res["projection"]["NOPAT"].iloc[-1] * (1 + g)
+        assert res["vt"] == pytest.approx(nopat_suivant / 0.10)
+
+
+def test_mi_annee_augmente_la_valeur(hyp, sg, params):
+    w = wacc(params)
+    base = valoriser(hyp, sg, w)["valeur_action"]
+    hyp.mi_annee = True
+    assert valoriser(hyp, sg, w)["valeur_action"] == pytest.approx(72.6, abs=0.1)
+    assert valoriser(hyp, sg, w)["valeur_action"] > base
+
+
+def test_date_de_valorisation(hyp, sg, params):
+    """Ramener la VE à aujourd'hui (× (1 + WACC)^t) puis retirer le dividende versé."""
+    w = wacc(params)
+    res0 = valoriser(hyp, sg, w)
+    res = valoriser(hyp, sg, w, decalage=0.5, dividendes_par_action=2.0)
+    attendu = (res0["ve"] * (1 + w) ** 0.5 - 10356 - 568 - 1444) / 489.9 - 2.0
+    assert res["valeur_action"] == pytest.approx(attendu)
+
+
+def test_loyers_reduisent_fcff(hyp, sg):
+    base = projeter_fcff(hyp, sg)["FCFF"]
+    hyp.loyers_ca = 0.01
+    avec = projeter_fcff(hyp, sg)
+    assert ((base - avec["FCFF"]) - avec["CA"] * 0.01).abs().max() < 1e-9
