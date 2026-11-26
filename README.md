@@ -84,7 +84,7 @@ Python 3.12 ou plus récent.
 git clone https://github.com/heliosnry/dcf-app.git
 cd dcf-app
 python -m venv .venv
-.venv\Scripts\activate            # Windows (macOS / Linux : source .venv/bin/activate)
+.venv\Scripts\activate
 pip install -r requirements-dev.txt
 streamlit run src/app.py          # lance l'application
 pytest                            # lance les tests
